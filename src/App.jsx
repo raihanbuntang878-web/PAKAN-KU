@@ -1,16 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Home, ShoppingCart, User as UserIcon, Search, 
   Star, ChevronLeft, Plus, Minus, Trash2, Package, 
-  MapPin, Store, MessageSquare, Leaf, LogOut, Edit2, Check, X
+  MapPin, Store, Leaf, LogOut, Edit2, Check, Upload, Banknote, Truck
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { 
-  getAuth, signInWithCustomToken, signInWithEmailAndPassword, 
+  getAuth, signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, signOut, onAuthStateChanged 
 } from 'firebase/auth';
 import { 
-  getFirestore, collection, doc, setDoc, getDoc, updateDoc, 
+  getFirestore, collection, doc, setDoc, updateDoc, 
   deleteDoc, onSnapshot 
 } from 'firebase/firestore';
 
@@ -28,6 +28,11 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = "pakanku-app";
+
+// --- CLOUDINARY CONFIG ---
+// Ganti cloud name ini jika Anda memiliki cloud name spesifik, default menggunakan "pakanku_cloud" sebagai placeholder
+const CLOUDINARY_CLOUD_NAME = "dnvs1xixz"; 
+const CLOUDINARY_UPLOAD_PRESET = "pakanku_upload";
 
 const categories = [
   { id: 'c1', name: 'Ayam', icon: '🐔' },
@@ -55,7 +60,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
 
   // --- HELPERS ---
-  const formatRp = (num) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(num);
+  const formatRp = (num) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(num || 0);
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   
   const navigateTo = (view, tab = activeTab) => {
@@ -63,21 +68,53 @@ export default function App() {
     if (view === 'main') setActiveTab(tab);
   };
 
-  // --- FIREBASE EFFECTS ---
-  useEffect(() => {
-     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-    setUser(currentUser);
-
-    if (!currentUser) {
-      setUserProfile(null);
-      setActiveView('auth');
-      setIsLoading(false);
+  // --- CLOUDINARY UPLOAD FUNCTION ---
+  const uploadImage = async (file) => {
+    if (!file) return null;
+    const data = new FormData();
+    data.append("file", file);
+    data.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+    try {
+      const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
+        method: "POST",
+        body: data,
+      });
+      const json = await res.json();
+      return json.secure_url; // URL HTTPS
+    } catch (err) {
+      console.error("Upload error:", err);
+      showToast('Gagal mengupload gambar.');
+      return null;
     }
-  });
+  };
 
-  return () => unsubscribe();
-}, []);
+  // --- FIREBASE EFFECTS ---
 
+  // 1. GLOBAL: Fetch Products (Tidak butuh login)
+  useEffect(() => {
+    const prodRef = collection(db, 'artifacts', appId, 'public', 'data', 'products');
+    const unsubProducts = onSnapshot(prodRef, (snapshot) => {
+      const prods = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setProducts(prods);
+    });
+    return () => unsubProducts();
+  }, []);
+
+  // 2. AUTHENTICATION LISTENER
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (!currentUser) {
+        setUserProfile(null);
+        setOrders([]);
+        setActiveView('auth');
+        setIsLoading(false);
+      }
+    });
+    return () => unsubscribeAuth();
+  }, []);
+
+  // 3. USER-SPECIFIC DATA LISTENER
   useEffect(() => {
     if (!user) return;
     
@@ -85,33 +122,25 @@ export default function App() {
     const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', user.uid);
     const unsubUser = onSnapshot(userRef, (docSnap) => {
       if (docSnap.exists()) {
-        setUserProfile(docSnap.data());
+        const data = docSnap.data();
+        setUserProfile(data);
         if (activeView === 'auth') {
-          navigateTo('main', docSnap.data().role === 'seller' ? 'dashboard' : 'home');
+          navigateTo('main', data.role === 'seller' ? 'dashboard' : 'home');
         }
       }
       setIsLoading(false);
     });
 
-    // Fetch All Products
-    const prodRef = collection(db, 'artifacts', appId, 'public', 'data', 'products');
-    const unsubProducts = onSnapshot(prodRef, (snapshot) => {
-      const prods = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setProducts(prods);
-    });
-
-    // Fetch All Orders
+    // Fetch Orders
     const ordRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
     const unsubOrders = onSnapshot(ordRef, (snapshot) => {
       const ords = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      // Sort descending by date locally
-      ords.sort((a, b) => new Date(b.date) - new Date(a.date));
+      ords.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       setOrders(ords);
     });
 
     return () => {
       unsubUser();
-      unsubProducts();
       unsubOrders();
     };
   }, [user]);
@@ -152,44 +181,6 @@ export default function App() {
   const removeCartItem = (id) => setCart(prev => prev.filter(item => item.id !== id));
   const getCartTotal = () => cart.reduce((total, item) => total + (item.price * item.qty), 0);
 
-  // --- CHECKOUT FUNCTION ---
-  const handleCheckout = async (paymentMethod) => {
-    if (cart.length === 0) return;
-    try {
-      const newOrderRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'orders'));
-      
-      // Reduce Stock First
-      for (const item of cart) {
-        const productRef = doc(db, 'artifacts', appId, 'public', 'data', 'products', item.id);
-        const currentProduct = products.find(p => p.id === item.id);
-        if (currentProduct) {
-          await updateDoc(productRef, {
-            stock: currentProduct.stock - item.qty,
-            sold: (currentProduct.sold || 0) + item.qty
-          });
-        }
-      }
-
-      // Save Order
-      await setDoc(newOrderRef, {
-        date: new Date().toISOString(),
-        items: cart,
-        total: getCartTotal() + 15000,
-        status: 'Menunggu Pembayaran',
-        paymentMethod,
-        buyerId: user.uid,
-        buyerName: userProfile.name,
-        sellerIds: [...new Set(cart.map(c => c.sellerId))]
-      });
-
-      setCart([]);
-      showToast('Pesanan berhasil dibuat!');
-      navigateTo('main', 'orders');
-    } catch (e) {
-      showToast('Gagal checkout: ' + e.message);
-    }
-  };
-
   // --- VIEWS ---
   if (isLoading && activeView !== 'auth') {
     return <div className="flex h-screen items-center justify-center bg-[#FFF8E1] text-[#8D6E63]">Memuat data...</div>;
@@ -215,7 +206,10 @@ export default function App() {
             id: userCred.user.uid,
             name: formData.name,
             role: formData.role,
-            email: formData.email
+            email: formData.email,
+            phone: '',
+            address: '',
+            photoProfile: ''
           });
         }
       } catch (err) {
@@ -250,7 +244,7 @@ export default function App() {
               className="w-full px-4 py-3 rounded-xl border border-[#8D6E63]/30 focus:outline-none focus:ring-2 focus:ring-[#4CAF50] bg-white"
               value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})}
             />
-            <input type="password" placeholder="Password" required
+            <input type="password" placeholder="Password" required minLength="6"
               className="w-full px-4 py-3 rounded-xl border border-[#8D6E63]/30 focus:outline-none focus:ring-2 focus:ring-[#4CAF50] bg-white"
               value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})}
             />
@@ -268,8 +262,8 @@ export default function App() {
               </div>
             )}
             
-            <button disabled={loading} type="submit" className="w-full bg-[#4CAF50] text-white py-3.5 rounded-xl font-bold hover:bg-[#388E3C] transition shadow-md mt-4 disabled:opacity-70">
-              {loading ? 'Memproses...' : (isLogin ? 'Masuk' : 'Daftar')}
+            <button disabled={loading} type="submit" className="w-full bg-[#4CAF50] text-white py-3.5 rounded-xl font-bold hover:bg-[#388E3C] transition shadow-md mt-4 disabled:opacity-70 flex justify-center items-center">
+              {loading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : (isLogin ? 'Masuk' : 'Daftar')}
             </button>
           </form>
 
@@ -280,13 +274,17 @@ export default function App() {
             </button>
           </p>
         </div>
+
+        {/* Tulisan Created By di halaman Auth */}
+        <p className="absolute bottom-6 text-center text-xs text-white/90 z-10 font-bold tracking-widest drop-shadow-md">
+          Created by : M. Raihan
+        </p>
       </div>
     );
   };
 
   const BuyerHomeTab = () => (
     <div className="flex flex-col h-full overflow-y-auto bg-[#FFF8E1] pb-24">
-      {/* Header */}
       <div className="bg-[#4CAF50] p-4 sticky top-0 z-10 shadow-sm rounded-b-2xl">
         <div className="flex gap-2">
           <div className="flex-1 bg-white rounded-xl flex items-center px-4 py-2 shadow-inner">
@@ -296,7 +294,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* Banner */}
       <div className="p-4">
         <div className="bg-gradient-to-r from-[#8D6E63] to-[#5D4037] rounded-2xl h-36 flex items-center p-5 text-white shadow-lg relative overflow-hidden">
           <div className="z-10">
@@ -307,7 +304,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* Recommended Products */}
       <div className="p-4">
         <h3 className="font-bold text-[#5D4037] mb-4 flex items-center gap-2 text-lg">
           <span className="bg-[#4CAF50] w-1.5 h-6 rounded-full"></span> Pilihan Peternak
@@ -326,7 +322,7 @@ export default function App() {
                   </div>
                 )}
                 <div className="relative">
-                  <img src={product.image || "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?auto=format&fit=crop&q=80&w=300&h=300"} alt={product.name} className="w-full aspect-square object-cover" />
+                  <img src={product.image || "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?auto=format&fit=crop&q=80&w=300&h=300"} alt={product.name} className="w-full aspect-square object-cover bg-gray-100" />
                   <div className="absolute bottom-2 left-2 bg-[#5D4037]/70 backdrop-blur-sm text-white text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1">
                     <Star size={10} className="fill-yellow-400 text-yellow-400"/> {product.rating || 'Baru'}
                   </div>
@@ -361,7 +357,7 @@ export default function App() {
         
         <div className="flex-1 overflow-y-auto pb-24">
           <div className="relative">
-            <img src={selectedProduct.image || "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?auto=format&fit=crop&q=80&w=300&h=300"} alt={selectedProduct.name} className="w-full aspect-square object-cover" />
+            <img src={selectedProduct.image || "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?auto=format&fit=crop&q=80&w=300&h=300"} alt={selectedProduct.name} className="w-full aspect-square object-cover bg-gray-100" />
             {isOutOfStock && (
               <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
                 <span className="bg-red-600 text-white font-bold px-6 py-2 rounded-full text-lg shadow-2xl border-2 border-white/20">STOK HABIS</span>
@@ -397,7 +393,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Bottom Bar For Buyer */}
         {userProfile?.role === 'buyer' && (
           <div className="bg-white border-t border-[#8D6E63]/20 p-3 flex gap-2 fixed bottom-0 w-full shadow-[0_-8px_15px_-3px_rgba(0,0,0,0.05)] z-30">
             <button disabled={isOutOfStock} onClick={() => addToCart(selectedProduct)}
@@ -474,10 +469,58 @@ export default function App() {
   );
 
   const CheckoutView = () => {
-    const [method, setMethod] = useState('Transfer Bank');
+    const [method, setMethod] = useState('COD');
+    const [courier, setCourier] = useState('JNT');
+    const [isCheckingOut, setIsCheckingOut] = useState(false);
+
     const subtotal = getCartTotal();
-    const ongkir = 15000;
+    const ongkir = courier === 'Lex ID' ? 10000 : 15000;
     const total = subtotal + ongkir;
+
+    const handleCheckout = async () => {
+      if (!userProfile?.address) {
+        showToast('Lengkapi alamat pengiriman di Profil Anda dulu!');
+        return;
+      }
+      setIsCheckingOut(true);
+      try {
+        const newOrderRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'orders'));
+        
+        // Reduce Stock
+        for (const item of cart) {
+          const productRef = doc(db, 'artifacts', appId, 'public', 'data', 'products', item.id);
+          const currentProduct = products.find(p => p.id === item.id);
+          if (currentProduct) {
+            await updateDoc(productRef, {
+              stock: currentProduct.stock - item.qty,
+              sold: (currentProduct.sold || 0) + item.qty
+            });
+          }
+        }
+
+        // Save Order
+        await setDoc(newOrderRef, {
+          id: newOrderRef.id,
+          createdAt: new Date().toISOString(),
+          items: cart,
+          total: total,
+          status: 'Dikemas', // New Status Flow
+          paymentMethod: method,
+          courier: courier,
+          buyerId: user.uid,
+          buyerName: userProfile.name,
+          address: userProfile.address,
+          sellerIds: [...new Set(cart.map(c => c.sellerId))]
+        });
+
+        setCart([]);
+        showToast('Pesanan berhasil dibuat!');
+        navigateTo('main', 'orders');
+      } catch (e) {
+        showToast('Gagal checkout: ' + e.message);
+      }
+      setIsCheckingOut(false);
+    };
 
     return (
       <div className="flex flex-col h-screen bg-[#FFF8E1]">
@@ -487,47 +530,69 @@ export default function App() {
         </div>
 
         <div className="flex-1 overflow-y-auto pb-32">
+          {/* Address Section */}
           <div className="bg-white p-5 mb-2 shadow-sm border-b border-[#8D6E63]/20">
-            <h3 className="font-bold text-[#5D4037] flex items-center gap-2 mb-3"><MapPin size={20} className="text-[#4CAF50]" /> Alamat Pengiriman</h3>
-            <div className="bg-[#FFF8E1] p-4 rounded-xl border border-[#8D6E63]/30">
-              <p className="text-sm font-bold text-[#5D4037] mb-1">{userProfile?.name}</p>
-              <p className="text-xs font-medium text-[#8D6E63] leading-relaxed">Alamat tersimpan di profil pengguna.</p>
+            <div className="flex justify-between items-center mb-3">
+              <h3 className="font-bold text-[#5D4037] flex items-center gap-2"><MapPin size={20} className="text-[#4CAF50]" /> Alamat Pengiriman</h3>
+              <button onClick={() => navigateTo('main', 'profile')} className="text-xs text-[#4CAF50] font-bold">Ubah</button>
             </div>
-          </div>
-
-          <div className="bg-white p-5 mb-2 shadow-sm border-y border-[#8D6E63]/20">
-            <h3 className="font-bold text-[#5D4037] mb-4 text-lg">Pesanan Pakan</h3>
-            {cart.map(item => (
-              <div key={item.id} className="flex gap-4 mb-4 border-b border-[#8D6E63]/20 pb-4 last:border-0 last:pb-0">
-                <img src={item.image || "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?auto=format&fit=crop&q=80&w=300&h=300"} alt={item.name} className="w-16 h-16 rounded-xl object-cover border border-[#FFF8E1] shadow-sm" />
-                <div className="flex-1 flex flex-col justify-center">
-                  <h4 className="text-sm font-medium text-[#5D4037] line-clamp-1 mb-1">{item.name}</h4>
-                  <div className="flex justify-between items-center">
-                    <p className="text-xs font-medium text-[#8D6E63]">{item.qty} x {formatRp(item.price)}</p>
-                    <p className="text-sm font-bold text-[#5D4037]">{formatRp(item.qty * item.price)}</p>
-                  </div>
-                </div>
+            {userProfile?.address ? (
+              <div className="bg-[#FFF8E1] p-4 rounded-xl border border-[#8D6E63]/30">
+                <p className="text-sm font-bold text-[#5D4037] mb-1">{userProfile.name} <span className="text-[#8D6E63] font-medium ml-2">({userProfile.phone})</span></p>
+                <p className="text-sm font-medium text-[#8D6E63] leading-relaxed">{userProfile.address}</p>
               </div>
-            ))}
+            ) : (
+              <div className="bg-red-50 p-4 rounded-xl border border-red-200">
+                <p className="text-sm text-red-600 font-bold mb-2">Alamat belum diisi!</p>
+                <button onClick={() => navigateTo('main', 'profile')} className="text-xs bg-red-600 text-white px-3 py-1.5 rounded-lg font-bold">Isi Alamat Sekarang</button>
+              </div>
+            )}
           </div>
 
+          {/* Courier Section */}
           <div className="bg-white p-5 mb-2 shadow-sm border-y border-[#8D6E63]/20">
-            <h3 className="font-bold text-[#5D4037] mb-4 text-lg">Metode Pembayaran</h3>
+            <h3 className="font-bold text-[#5D4037] mb-4 text-lg flex items-center gap-2"><Truck size={20} className="text-[#8D6E63]" /> Kurir Pengiriman</h3>
             <div className="space-y-3">
-              {['Transfer Bank', 'COD (Bayar di Tempat)'].map(m => (
-                <label key={m} className={`flex items-center gap-3 p-4 border-2 rounded-xl cursor-pointer transition shadow-sm ${method === m ? 'border-[#4CAF50] bg-[#4CAF50]/10' : 'border-[#8D6E63]/20 bg-white hover:border-[#8D6E63]/50'}`}>
-                  <input type="radio" name="payment" checked={method === m} onChange={() => setMethod(m)} className="text-[#4CAF50] w-4 h-4 accent-[#4CAF50]" />
-                  <span className={`text-sm font-bold ${method === m ? 'text-[#388E3C]' : 'text-[#5D4037]'}`}>{m}</span>
+              {['JNT', 'SiCepat', 'Lex ID'].map(c => (
+                <label key={c} className={`flex items-center justify-between p-3 border-2 rounded-xl cursor-pointer transition shadow-sm ${courier === c ? 'border-[#4CAF50] bg-[#4CAF50]/10' : 'border-[#8D6E63]/20 bg-white hover:border-[#8D6E63]/50'}`}>
+                  <div className="flex items-center gap-3">
+                    <input type="radio" checked={courier === c} onChange={() => setCourier(c)} className="text-[#4CAF50] w-4 h-4 accent-[#4CAF50]" />
+                    <span className={`text-sm font-bold ${courier === c ? 'text-[#388E3C]' : 'text-[#5D4037]'}`}>{c}</span>
+                  </div>
+                  <span className="text-xs font-bold text-[#8D6E63]">{c === 'Lex ID' ? 'Rp 10.000' : 'Rp 15.000'}</span>
                 </label>
               ))}
             </div>
           </div>
 
+          {/* Payment Section */}
+          <div className="bg-white p-5 mb-2 shadow-sm border-y border-[#8D6E63]/20">
+            <h3 className="font-bold text-[#5D4037] mb-4 text-lg flex items-center gap-2"><Banknote size={20} className="text-[#8D6E63]" /> Metode Pembayaran</h3>
+            <div className="space-y-3">
+              {['COD', 'Transfer Bank'].map(m => (
+                <div key={m}>
+                  <label className={`flex items-center gap-3 p-4 border-2 rounded-xl cursor-pointer transition shadow-sm ${method === m ? 'border-[#4CAF50] bg-[#4CAF50]/10' : 'border-[#8D6E63]/20 bg-white hover:border-[#8D6E63]/50'}`}>
+                    <input type="radio" checked={method === m} onChange={() => setMethod(m)} className="text-[#4CAF50] w-4 h-4 accent-[#4CAF50]" />
+                    <span className={`text-sm font-bold ${method === m ? 'text-[#388E3C]' : 'text-[#5D4037]'}`}>{m === 'COD' ? 'Bayar di Tempat (COD)' : 'Transfer Bank'}</span>
+                  </label>
+                  {method === 'Transfer Bank' && m === 'Transfer Bank' && (
+                    <div className="mt-2 p-3 bg-blue-50 border border-blue-100 rounded-xl text-sm text-blue-800">
+                      <p className="font-bold mb-1">BCA: 0123456789</p>
+                      <p className="font-bold">Mandiri: 9876543210</p>
+                      <p className="text-xs mt-2 opacity-80">a/n PT Pakanku Ternak Sejahtera. Verifikasi otomatis.</p>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Summary Section */}
           <div className="bg-white p-5 shadow-sm border-t border-[#8D6E63]/20">
             <h3 className="font-bold text-[#5D4037] mb-4 text-lg">Rincian Pembayaran</h3>
             <div className="space-y-2 mb-4">
-              <div className="flex justify-between text-sm font-medium text-[#8D6E63]"><span>Subtotal Pakan</span><span>{formatRp(subtotal)}</span></div>
-              <div className="flex justify-between text-sm font-medium text-[#8D6E63]"><span>Ongkos Kirim</span><span>{formatRp(ongkir)}</span></div>
+              <div className="flex justify-between text-sm font-medium text-[#8D6E63]"><span>Subtotal Pakan ({cart.length} barang)</span><span>{formatRp(subtotal)}</span></div>
+              <div className="flex justify-between text-sm font-medium text-[#8D6E63]"><span>Ongkos Kirim ({courier})</span><span>{formatRp(ongkir)}</span></div>
             </div>
             <div className="flex justify-between font-bold text-[#5D4037] pt-4 border-t border-[#8D6E63]/20 text-lg">
               <span>Total Pembayaran</span><span className="text-[#4CAF50]">{formatRp(total)}</span>
@@ -540,7 +605,9 @@ export default function App() {
             <p className="text-xs font-medium text-[#8D6E63] mb-0.5">Total Pembayaran</p>
             <p className="text-xl font-bold text-[#4CAF50]">{formatRp(total)}</p>
           </div>
-          <button onClick={() => handleCheckout(method)} className="bg-[#4CAF50] text-white px-8 py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition">Buat Pesanan</button>
+          <button disabled={isCheckingOut || !userProfile?.address} onClick={handleCheckout} className="bg-[#4CAF50] disabled:bg-gray-400 text-white px-8 py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition flex items-center gap-2">
+            {isCheckingOut ? 'Memproses...' : 'Buat Pesanan'}
+          </button>
         </div>
       </div>
     );
@@ -549,7 +616,7 @@ export default function App() {
   const OrdersTab = () => {
     const isSeller = userProfile?.role === 'seller';
     
-    // Filter orders based on Role
+    // Filter orders
     let filteredOrders = orders;
     if (isSeller) {
       filteredOrders = orders.filter(o => o.sellerIds && o.sellerIds.includes(user.uid));
@@ -559,30 +626,30 @@ export default function App() {
 
     const updateStatus = async (orderId, newStatus) => {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'orders', orderId), { status: newStatus });
-      showToast(`Status pesanan diperbarui menjadi ${newStatus}`);
+      showToast(`Status diperbarui: ${newStatus}`);
     };
 
     return (
       <div className="flex flex-col h-screen bg-[#FFF8E1]">
         <div className="bg-[#4CAF50] text-white p-4 text-center font-bold text-lg shadow-sm sticky top-0 z-20 rounded-b-2xl">
-          {isSeller ? 'Pesanan Masuk' : 'Pesanan Saya'}
+          {isSeller ? 'Pesanan Masuk' : 'Riwayat Pesanan Saya'}
         </div>
         
         <div className="flex-1 overflow-y-auto p-4 pb-24 space-y-4">
           {filteredOrders.length === 0 ? (
-            <div className="text-center text-[#8D6E63] mt-16 font-medium">Belum ada pesanan saat ini.</div>
+            <div className="text-center text-[#8D6E63] mt-16 font-medium">Belum ada pesanan.</div>
           ) : (
             filteredOrders.map(order => (
               <div key={order.id} className="bg-white rounded-2xl p-5 shadow-sm border border-[#8D6E63]/20">
-                <div className="flex justify-between items-center mb-4 pb-4 border-b border-[#8D6E63]/20">
+                <div className="flex justify-between items-center mb-3 pb-3 border-b border-[#8D6E63]/20">
                   <div className="flex items-center gap-2">
                     <Store size={18} className="text-[#8D6E63]" />
                     <span className="font-bold text-sm text-[#5D4037]">{isSeller ? `Pembeli: ${order.buyerName}` : 'Detail Pesanan'}</span>
                   </div>
                   <span className={`text-[10px] font-bold px-2.5 py-1 rounded-md shadow-sm uppercase tracking-wide ${
-                    order.status === 'Selesai' ? 'bg-[#4CAF50]/20 text-[#4CAF50] border border-[#4CAF50]/30' : 
-                    order.status === 'Menunggu Pembayaran' ? 'bg-red-100 text-red-700 border border-red-200' : 
-                    'bg-[#8D6E63]/20 text-[#8D6E63] border border-[#8D6E63]/30'
+                    order.status === 'Sampai' ? 'bg-[#4CAF50]/20 text-[#4CAF50] border border-[#4CAF50]/30' : 
+                    order.status === 'Dikirim' ? 'bg-blue-100 text-blue-700 border border-blue-200' : 
+                    'bg-yellow-100 text-yellow-700 border border-yellow-200'
                   }`}>
                     {order.status}
                   </span>
@@ -593,32 +660,33 @@ export default function App() {
                     <img src={item.image || "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?auto=format&fit=crop&q=80&w=300&h=300"} alt={item.name} className="w-16 h-16 rounded-xl object-cover border border-[#FFF8E1]" />
                     <div className="flex-1">
                       <h4 className="text-sm font-bold text-[#5D4037] line-clamp-1 mb-1">{item.name}</h4>
-                      <p className="text-xs font-medium text-[#8D6E63]">{item.qty} karung/pack x {formatRp(item.price)}</p>
+                      <p className="text-xs font-medium text-[#8D6E63] mb-1">{item.qty} karung/pack x {formatRp(item.price)}</p>
                     </div>
                   </div>
                 ))}
                 
-                <div className="flex justify-between items-center pt-4 border-t border-[#8D6E63]/20 mt-4">
-                  <p className="text-xs font-medium text-[#8D6E63]">Total Pesanan</p>
+                <div className="bg-[#FFF8E1] p-3 rounded-xl mt-3 text-xs text-[#8D6E63]">
+                  <p><span className="font-bold">Kurir:</span> {order.courier}</p>
+                  <p><span className="font-bold">Metode Pembayaran:</span> {order.paymentMethod}</p>
+                  {isSeller && <p className="mt-1"><span className="font-bold text-[#5D4037]">Alamat:</span> {order.address}</p>}
+                </div>
+
+                <div className="flex justify-between items-center pt-3 mt-3 border-t border-[#8D6E63]/20">
+                  <p className="text-xs font-medium text-[#8D6E63]">Total Transaksi</p>
                   <p className="font-bold text-[#4CAF50] text-lg">{formatRp(order.total)}</p>
                 </div>
                 
-                {/* SELLER CONTROLS */}
-                {isSeller && order.status === 'Menunggu Pembayaran' && (
+                {/* SELLER CONTROLS: Dikemas -> Dikirim */}
+                {isSeller && order.status === 'Dikemas' && (
                   <div className="mt-4 flex gap-2">
-                    <button onClick={() => updateStatus(order.id, 'Diproses')} className="flex-1 bg-[#4CAF50] text-white py-2 rounded-xl text-sm font-bold shadow hover:bg-[#388E3C] transition">Proses Pesanan</button>
-                  </div>
-                )}
-                {isSeller && order.status === 'Diproses' && (
-                  <div className="mt-4 flex gap-2">
-                    <button onClick={() => updateStatus(order.id, 'Dikirim')} className="flex-1 bg-[#8D6E63] text-white py-2 rounded-xl text-sm font-bold shadow hover:bg-[#5D4037] transition">Kirim Pesanan</button>
+                    <button onClick={() => updateStatus(order.id, 'Dikirim')} className="flex-1 bg-[#4CAF50] text-white py-2.5 rounded-xl text-sm font-bold shadow hover:bg-[#388E3C] transition">Kirim Pesanan</button>
                   </div>
                 )}
                 
-                {/* BUYER CONTROLS */}
+                {/* BUYER CONTROLS: Dikirim -> Sampai */}
                 {!isSeller && order.status === 'Dikirim' && (
                   <div className="mt-4 flex gap-2">
-                    <button onClick={() => updateStatus(order.id, 'Selesai')} className="flex-1 bg-[#4CAF50] text-white py-2 rounded-xl text-sm font-bold shadow hover:bg-[#388E3C] transition">Pesanan Diterima</button>
+                    <button onClick={() => updateStatus(order.id, 'Sampai')} className="flex-1 bg-[#4CAF50] text-white py-2.5 rounded-xl text-sm font-bold shadow hover:bg-[#388E3C] transition">Pesanan Diterima</button>
                   </div>
                 )}
               </div>
@@ -632,9 +700,22 @@ export default function App() {
   const SellerDashboard = () => {
     const [isAdding, setIsAdding] = useState(false);
     const [editId, setEditId] = useState(null);
+    const [isUploading, setIsUploading] = useState(false);
     const [formProd, setFormProd] = useState({ name: '', price: '', stock: '', category: 'Ayam', desc: '', image: '' });
+    const fileInputRef = useRef(null);
 
     const myProducts = products.filter(p => p.sellerId === user.uid);
+
+    const handleFileSelect = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      setIsUploading(true);
+      const url = await uploadImage(file);
+      if (url) {
+        setFormProd({ ...formProd, image: url });
+      }
+      setIsUploading(false);
+    };
 
     const handleSubmitProduct = async (e) => {
       e.preventDefault();
@@ -648,8 +729,8 @@ export default function App() {
           image: formProd.image || 'https://images.unsplash.com/photo-1524704654690-b56c05c78a00?auto=format&fit=crop&q=80&w=300&h=300',
           sellerId: user.uid,
           sellerName: userProfile.name,
-          rating: 0,
-          sold: 0
+          rating: formProd.rating || 0,
+          sold: formProd.sold || 0
         };
 
         if (editId) {
@@ -689,6 +770,20 @@ export default function App() {
           </div>
           
           <form onSubmit={handleSubmitProduct} className="space-y-4 bg-white p-5 rounded-2xl shadow-sm border border-[#8D6E63]/20">
+            {/* Image Upload Area */}
+            <div className="flex flex-col items-center justify-center border-2 border-dashed border-[#8D6E63]/30 rounded-xl p-4 bg-[#FFF8E1]/50 relative overflow-hidden">
+              {formProd.image ? (
+                <img src={formProd.image} alt="Preview" className="w-full h-32 object-contain" />
+              ) : (
+                <div className="text-center text-[#8D6E63]">
+                  <Upload className="mx-auto mb-2 opacity-50" size={32}/>
+                  <span className="text-xs font-bold">Upload Foto Pakan</span>
+                </div>
+              )}
+              {isUploading && <div className="absolute inset-0 bg-white/70 flex items-center justify-center font-bold text-[#4CAF50]">Mengunggah...</div>}
+              <input type="file" accept="image/*" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onChange={handleFileSelect} disabled={isUploading} />
+            </div>
+
             <div>
               <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Nama Pakan</label>
               <input required type="text" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037]" value={formProd.name} onChange={e => setFormProd({...formProd, name: e.target.value})} />
@@ -710,14 +805,10 @@ export default function App() {
               </select>
             </div>
             <div>
-              <label className="text-xs font-bold text-[#8D6E63] mb-1 block">URL Gambar (Opsional)</label>
-              <input type="text" placeholder="https://..." className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm" value={formProd.image} onChange={e => setFormProd({...formProd, image: e.target.value})} />
-            </div>
-            <div>
-              <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Deskripsi</label>
+              <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Deskripsi Lengkap</label>
               <textarea required rows="3" className="w-full border border-[#8D6E63]/30 rounded-xl p-3 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm mt-1" value={formProd.desc} onChange={e => setFormProd({...formProd, desc: e.target.value})}></textarea>
             </div>
-            <button type="submit" className="w-full bg-[#4CAF50] text-white py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition mt-2">Simpan Produk</button>
+            <button disabled={isUploading} type="submit" className="w-full bg-[#4CAF50] disabled:bg-gray-400 text-white py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition mt-2">Simpan Produk</button>
           </form>
         </div>
       );
@@ -732,20 +823,24 @@ export default function App() {
         
         <div className="flex-1 overflow-y-auto p-4 pb-24 space-y-4">
           <div className="bg-white p-4 rounded-2xl shadow-sm border border-[#8D6E63]/20 flex items-center gap-4">
-            <div className="w-12 h-12 bg-[#FFF8E1] rounded-full flex items-center justify-center text-[#8D6E63] border border-[#8D6E63]/30"><Store /></div>
+            {userProfile?.photoProfile ? (
+               <img src={userProfile.photoProfile} alt="Toko" className="w-12 h-12 rounded-full object-cover border border-[#4CAF50]" />
+            ) : (
+               <div className="w-12 h-12 bg-[#FFF8E1] rounded-full flex items-center justify-center text-[#8D6E63] border border-[#8D6E63]/30"><Store /></div>
+            )}
             <div>
               <h3 className="font-bold text-[#5D4037]">{userProfile?.name}</h3>
               <p className="text-xs text-[#8D6E63]">{myProducts.length} Produk Aktif</p>
             </div>
           </div>
 
-          <h3 className="font-bold text-[#5D4037] mt-6 mb-2">Daftar Produk</h3>
+          <h3 className="font-bold text-[#5D4037] mt-6 mb-2">Daftar Produk Jualan</h3>
           {myProducts.length === 0 ? (
-            <p className="text-center text-[#8D6E63] mt-8 text-sm">Belum ada produk jualan. Tambahkan sekarang!</p>
+            <p className="text-center text-[#8D6E63] mt-8 text-sm bg-white p-6 rounded-2xl border border-dashed border-[#8D6E63]/30">Belum ada produk jualan. Tambahkan sekarang!</p>
           ) : (
             myProducts.map(prod => (
               <div key={prod.id} className="bg-white p-4 rounded-2xl shadow-sm border border-[#8D6E63]/20 flex gap-4">
-                 <img src={prod.image} alt={prod.name} className="w-20 h-20 rounded-xl object-cover border border-[#FFF8E1]" />
+                 <img src={prod.image} alt={prod.name} className="w-20 h-20 rounded-xl object-cover border border-[#FFF8E1] bg-gray-50" />
                  <div className="flex-1">
                    <h4 className="text-sm font-bold text-[#5D4037] line-clamp-1">{prod.name}</h4>
                    <p className="text-[#4CAF50] font-bold text-sm mb-1">{formatRp(prod.price)}</p>
@@ -763,31 +858,138 @@ export default function App() {
     );
   };
 
-  const ProfileTab = () => (
-    <div className="flex flex-col h-screen bg-[#FFF8E1] p-6 items-center justify-center relative">
-      <div className="w-24 h-24 bg-white rounded-full flex items-center justify-center shadow-lg border-4 border-[#4CAF50] mb-4">
-        <UserIcon size={40} className="text-[#8D6E63]" />
+  const ProfileTab = () => {
+    const [isEditing, setIsEditing] = useState(false);
+    const [editData, setEditData] = useState({ name: '', phone: '', address: '', photoProfile: '' });
+    const [isUploading, setIsUploading] = useState(false);
+
+    const startEdit = () => {
+      setEditData({
+        name: userProfile?.name || '',
+        phone: userProfile?.phone || '',
+        address: userProfile?.address || '',
+        photoProfile: userProfile?.photoProfile || ''
+      });
+      setIsEditing(true);
+    };
+
+    const handleProfileUpload = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      setIsUploading(true);
+      const url = await uploadImage(file);
+      if (url) {
+        setEditData({ ...editData, photoProfile: url });
+      }
+      setIsUploading(false);
+    };
+
+    const saveProfile = async (e) => {
+      e.preventDefault();
+      try {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', user.uid), editData);
+        showToast('Profil berhasil diperbarui!');
+        setIsEditing(false);
+      } catch (err) {
+        showToast('Gagal update profil');
+      }
+    };
+
+    if (isEditing) {
+      return (
+        <div className="flex flex-col h-screen bg-[#FFF8E1] p-6 pb-24 overflow-y-auto">
+          <div className="flex items-center mb-6">
+            <button onClick={() => setIsEditing(false)} className="text-[#8D6E63] p-2 bg-white rounded-full shadow"><ChevronLeft /></button>
+            <h2 className="text-xl font-bold text-[#5D4037] ml-4">Edit Profil</h2>
+          </div>
+
+          <form onSubmit={saveProfile} className="space-y-4 bg-white p-5 rounded-3xl shadow-sm border border-[#8D6E63]/20">
+            <div className="flex flex-col items-center mb-4 relative">
+               <div className="w-24 h-24 bg-gray-100 rounded-full overflow-hidden border-4 border-[#4CAF50] relative">
+                  {editData.photoProfile ? (
+                    <img src={editData.photoProfile} alt="Profil" className="w-full h-full object-cover" />
+                  ) : (
+                    <UserIcon size={40} className="text-[#8D6E63] absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2" />
+                  )}
+                  {isUploading && <div className="absolute inset-0 bg-black/50 flex items-center justify-center"><div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div></div>}
+               </div>
+               <label className="mt-2 text-xs text-[#4CAF50] font-bold cursor-pointer">
+                  Ubah Foto
+                  <input type="file" accept="image/*" className="hidden" onChange={handleProfileUpload} disabled={isUploading} />
+               </label>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Nama Lengkap / Toko</label>
+              <input required type="text" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037]" value={editData.name} onChange={e => setEditData({...editData, name: e.target.value})} />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Nomor Telepon (WA Aktif)</label>
+              <input required type="text" placeholder="08123456789" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037]" value={editData.phone} onChange={e => setEditData({...editData, phone: e.target.value})} />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Alamat Lengkap Pengiriman</label>
+              <textarea required rows="3" placeholder="Jl. Raya Peternak No.12, RT 01/RW 02..." className="w-full border border-[#8D6E63]/30 rounded-xl p-3 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm mt-1" value={editData.address} onChange={e => setEditData({...editData, address: e.target.value})}></textarea>
+            </div>
+            <button disabled={isUploading} type="submit" className="w-full bg-[#4CAF50] disabled:bg-gray-400 text-white py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition mt-4">Simpan Perubahan</button>
+          </form>
+        </div>
+      )
+    }
+
+    return (
+      <div className="flex flex-col h-screen bg-[#FFF8E1] p-6 items-center pt-16 relative">
+        <div className="w-28 h-28 bg-white rounded-full flex items-center justify-center shadow-lg border-4 border-[#4CAF50] mb-4 overflow-hidden relative group">
+          {userProfile?.photoProfile ? (
+            <img src={userProfile.photoProfile} alt="Profil" className="w-full h-full object-cover" />
+          ) : (
+            <UserIcon size={48} className="text-[#8D6E63]" />
+          )}
+        </div>
+        <h2 className="text-2xl font-bold text-[#5D4037] mb-1">{userProfile?.name}</h2>
+        <span className="bg-[#4CAF50]/10 text-[#4CAF50] px-4 py-1 rounded-full text-xs font-bold uppercase tracking-widest border border-[#4CAF50]/30 mb-6">{userProfile?.role}</span>
+        
+        <div className="w-full bg-white rounded-3xl p-5 shadow-sm border border-[#8D6E63]/20 mb-8 space-y-4">
+          <div>
+            <p className="text-[10px] uppercase font-bold text-[#8D6E63] mb-0.5">Email</p>
+            <p className="text-sm text-[#5D4037] font-medium">{userProfile?.email}</p>
+          </div>
+          <div>
+            <p className="text-[10px] uppercase font-bold text-[#8D6E63] mb-0.5">Telepon</p>
+            <p className="text-sm text-[#5D4037] font-medium">{userProfile?.phone || <span className="text-red-400 italic">Belum diisi</span>}</p>
+          </div>
+          <div>
+            <p className="text-[10px] uppercase font-bold text-[#8D6E63] mb-0.5">Alamat Lengkap</p>
+            <p className="text-sm text-[#5D4037] font-medium">{userProfile?.address || <span className="text-red-400 italic">Belum diisi</span>}</p>
+          </div>
+          <button onClick={startEdit} className="w-full mt-2 bg-[#FFF8E1] text-[#8D6E63] border border-[#8D6E63]/30 py-2.5 rounded-xl font-bold text-sm shadow-inner hover:bg-[#8D6E63]/10 transition flex items-center justify-center gap-2">
+            <Edit2 size={16}/> Edit Profil
+          </button>
+        </div>
+        
+        <button onClick={() => signOut(auth)} className="w-full max-w-xs bg-white border border-red-200 text-red-500 py-3.5 rounded-2xl font-bold shadow-sm hover:bg-red-50 hover:text-red-600 transition flex items-center justify-center gap-2">
+          <LogOut size={18}/> Keluar Akun
+        </button>
+
+        {/* Tulisan Created By di halaman Profil */}
+        <p className="mt-8 mb-4 text-xs text-[#8D6E63]/60 font-bold tracking-widest uppercase text-center w-full pb-20">
+          Created by : M. Raihan
+        </p>
       </div>
-      <h2 className="text-2xl font-bold text-[#5D4037] mb-1">{userProfile?.name}</h2>
-      <span className="bg-[#4CAF50]/10 text-[#4CAF50] px-4 py-1 rounded-full text-xs font-bold uppercase tracking-widest border border-[#4CAF50]/30 mb-8">{userProfile?.role}</span>
-      
-      <p className="text-[#8D6E63] text-sm mb-10">{userProfile?.email}</p>
-      
-      <button onClick={() => signOut(auth)} className="w-full max-w-xs bg-white border border-[#8D6E63]/30 text-[#8D6E63] py-3.5 rounded-2xl font-bold shadow-sm hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition flex items-center justify-center gap-2">
-        <LogOut size={18}/> Keluar Akun
-      </button>
-    </div>
-  );
+    );
+  };
 
   // --- MAIN RENDER ---
   return (
     <div className="w-full max-w-md mx-auto h-screen relative bg-white overflow-hidden shadow-2xl">
+      {/* Toast Notification */}
       {toast && (
-        <div className="absolute top-10 left-1/2 transform -translate-x-1/2 bg-[#5D4037] text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-2xl z-50 animate-bounce flex items-center gap-2 whitespace-nowrap">
+        <div className="absolute top-10 left-1/2 transform -translate-x-1/2 bg-[#5D4037] text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-2xl z-[100] flex items-center gap-2 whitespace-nowrap animate-in fade-in slide-in-from-top-4 duration-300">
            <Check size={16} className="text-[#4CAF50]"/> {toast}
         </div>
       )}
 
+      {/* View Routing */}
       {activeView === 'auth' && <AuthView />}
       {activeView === 'main' && activeTab === 'home' && <BuyerHomeTab />}
       {activeView === 'main' && activeTab === 'dashboard' && <SellerDashboard />}
@@ -797,40 +999,40 @@ export default function App() {
       {activeView === 'product' && <ProductDetailView />}
       {activeView === 'checkout' && <CheckoutView />}
 
-      {/* BOTTOM NAVIGATION (Only visible on main views) */}
+      {/* BOTTOM NAVIGATION (Hanya tampil di main views) */}
       {activeView === 'main' && (
         <div className="absolute bottom-0 w-full bg-white border-t border-[#8D6E63]/20 flex justify-around p-2 pb-4 shadow-[0_-5px_20px_-5px_rgba(0,0,0,0.1)] z-40 rounded-t-3xl">
           {userProfile?.role === 'buyer' ? (
             <>
-              <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center p-2 transition ${activeTab === 'home' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
+              <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'home' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <Home size={24} className={activeTab==='home'?'fill-[#4CAF50]/20':''} />
                 <span className="text-[10px] font-bold mt-1">Beranda</span>
               </button>
-              <button onClick={() => setActiveTab('cart')} className={`flex flex-col items-center p-2 relative transition ${activeTab === 'cart' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
+              <button onClick={() => setActiveTab('cart')} className={`flex flex-col items-center p-2 relative transition-all ${activeTab === 'cart' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <ShoppingCart size={24} className={activeTab==='cart'?'fill-[#4CAF50]/20':''} />
                 {cart.length > 0 && <span className="absolute top-1 right-1 bg-red-500 text-white text-[10px] w-4 h-4 flex items-center justify-center rounded-full font-bold">{cart.length}</span>}
                 <span className="text-[10px] font-bold mt-1">Keranjang</span>
               </button>
-              <button onClick={() => setActiveTab('orders')} className={`flex flex-col items-center p-2 transition ${activeTab === 'orders' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
+              <button onClick={() => setActiveTab('orders')} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'orders' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <Package size={24} className={activeTab==='orders'?'fill-[#4CAF50]/20':''} />
                 <span className="text-[10px] font-bold mt-1">Pesanan</span>
               </button>
-              <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center p-2 transition ${activeTab === 'profile' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
+              <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'profile' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <UserIcon size={24} className={activeTab==='profile'?'fill-[#4CAF50]/20':''} />
                 <span className="text-[10px] font-bold mt-1">Profil</span>
               </button>
             </>
           ) : (
             <>
-              <button onClick={() => setActiveTab('dashboard')} className={`flex flex-col items-center p-2 transition ${activeTab === 'dashboard' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
+              <button onClick={() => setActiveTab('dashboard')} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'dashboard' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <Store size={24} className={activeTab==='dashboard'?'fill-[#4CAF50]/20':''} />
                 <span className="text-[10px] font-bold mt-1">Toko</span>
               </button>
-              <button onClick={() => setActiveTab('orders')} className={`flex flex-col items-center p-2 transition ${activeTab === 'orders' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
+              <button onClick={() => setActiveTab('orders')} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'orders' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <Package size={24} className={activeTab==='orders'?'fill-[#4CAF50]/20':''} />
                 <span className="text-[10px] font-bold mt-1">Pesanan</span>
               </button>
-              <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center p-2 transition ${activeTab === 'profile' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
+              <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'profile' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <UserIcon size={24} className={activeTab==='profile'?'fill-[#4CAF50]/20':''} />
                 <span className="text-[10px] font-bold mt-1">Profil</span>
               </button>
