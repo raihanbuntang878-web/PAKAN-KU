@@ -3,20 +3,26 @@ import {
   Home, ShoppingCart, User as UserIcon, Search, 
   Star, ChevronLeft, Plus, Minus, Trash2, Package, 
   MapPin, Store, Leaf, LogOut, Edit2, Check, Upload, 
-  Banknote, Truck, Map
+  Banknote, Truck, Map, Info
 } from 'lucide-react';
+
+// === FIREBASE IMPORTS ===
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, signOut, onAuthStateChanged 
+  createUserWithEmailAndPassword, signOut, onAuthStateChanged,
+  setPersistence, browserLocalPersistence
 } from 'firebase/auth';
 import { 
   getFirestore, collection, doc, setDoc, updateDoc, 
   deleteDoc, onSnapshot, getDoc 
 } from 'firebase/firestore';
 
+// === SUPABASE IMPORTS ===
+import { createClient } from '@supabase/supabase-js';
+
 // ==========================================
-// 1. FIREBASE CONFIGURATION (SESUAI REQUEST)
+// 1. FIREBASE CONFIGURATION (TIDAK DIUBAH)
 // ==========================================
 const firebaseConfig = {
   apiKey: "AIzaSyCIS1GZk6x89ITAIAaxaHxg_w00mcv2J-k",
@@ -27,18 +33,22 @@ const firebaseConfig = {
   appId: "1:600847552162:web:7c2e8b5c4612554ca291fb",
   measurementId: "G-EZMM4VZWD8"
 };
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
+// Menyetel Auth Persistence agar tidak logout saat refresh
+setPersistence(auth, browserLocalPersistence).catch((error) => {
+  console.error("Error setting persistence:", error);
+});
+
 // ==========================================
-// 2. SUPABASE CONFIGURATION (DIPERBARUI)
+// 2. SUPABASE CONFIGURATION
 // ==========================================
 const supabaseUrl = 'https://yyuajrvowmdxgncaskfs.supabase.co';
 const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl5dWFqcnZvd21keGduY2Fza2ZzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU4MjE0MzEsImV4cCI6MjA5MTM5NzQzMX0.MxfraBhGajHchVMWI4qHz_kN1ufVmPq6STTXeudQ3RA';
-
-// BUCKET TELAH DIPERBAIKI MENJADI 'images'
-const supabaseBucket = 'images'; 
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 const categories = [
   { id: 'c1', name: 'Ayam', icon: '🐔' },
@@ -74,46 +84,44 @@ export default function App() {
     if (view === 'main') setActiveTab(tab);
   };
 
-  // --- SUPABASE UPLOAD FUNCTION (DIPERBARUI) ---
+  // --- SUPABASE UPLOAD FUNCTION (MENGGUNAKAN SDK) ---
   const uploadToSupabase = async (file) => {
     if (!file) return null;
     try {
-      // Bersihkan nama file dari spasi atau karakter aneh yang bisa bikin error URL
       const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '');
-      const fileName = `${Date.now()}-${safeName}`;
+      const fileName = Date.now() + "-" + safeName;
+      
+      const { error } = await supabase.storage
+        .from("images")
+        .upload(fileName, file);
 
-      // Upload file menggunakan REST API fetch (Lebih stabil tanpa library external)
-      const res = await fetch(`${supabaseUrl}/storage/v1/object/${supabaseBucket}/${fileName}`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${supabaseKey}`,
-          'apikey': supabaseKey,
-          'Content-Type': file.type
-        },
-        body: file
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.message || 'Upload failed');
+      if (error) {
+        console.error("Supabase Upload Error:", error);
+        throw error;
       }
 
-      return `${supabaseUrl}/storage/v1/object/public/${supabaseBucket}/${fileName}`;
+      const { data } = supabase.storage
+        .from("images")
+        .getPublicUrl(fileName);
+
+      return data.publicUrl;
     } catch (err) {
       console.error("Upload exception:", err);
-      showToast('Terjadi kesalahan saat upload gambar.');
+      showToast('Gagal mengunggah gambar. Pastikan ukuran tidak terlalu besar.');
       return null;
     }
   };
 
   // --- FIREBASE EFFECTS ---
 
-  // 1. Fetch Products (Global - Buyer bisa lihat walau belum login/baru login)
+  // 1. Fetch Products (Selalu berjalan agar buyer bisa langsung lihat)
   useEffect(() => {
     const prodRef = collection(db, 'products');
     const unsubProducts = onSnapshot(prodRef, (snapshot) => {
       const prods = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setProducts(prods);
+    }, (error) => {
+      console.error("Error fetching products:", error);
     });
     return () => unsubProducts();
   }, []);
@@ -128,6 +136,7 @@ export default function App() {
         setActiveView('auth');
         setIsLoading(false);
       }
+      // Jika login, biarkan User & Orders Listener yang menangani navigasi
     });
     return () => unsubscribeAuth();
   }, []);
@@ -142,12 +151,14 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data();
         setUserProfile(data);
+        
+        // Hanya navigate ke main jika sebelumnya ada di layar auth (baru buka / login)
         if (activeView === 'auth') {
           navigateTo('main', data.role === 'seller' ? 'dashboard' : 'home');
         }
       }
       setIsLoading(false);
-    });
+    }, (err) => console.error(err));
 
     // Listen Orders
     const ordRef = collection(db, 'orders');
@@ -155,13 +166,13 @@ export default function App() {
       const ords = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       ords.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       setOrders(ords);
-    });
+    }, (err) => console.error(err));
 
     return () => {
       unsubUser();
       unsubOrders();
     };
-  }, [user]);
+  }, [user, activeView]);
 
   // --- CART FUNCTIONS ---
   const addToCart = (product) => {
@@ -200,8 +211,14 @@ export default function App() {
   const getCartTotal = () => cart.reduce((total, item) => total + (item.price * item.qty), 0);
 
   // --- VIEWS ---
-  if (isLoading && activeView !== 'auth') {
-    return <div className="flex h-screen items-center justify-center bg-[#FFF8E1] text-[#8D6E63] font-bold">Memuat data Pakanku...</div>;
+
+  if (isLoading && activeView === 'auth') {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center bg-[#FFF8E1] text-[#4CAF50] font-bold">
+        <div className="w-12 h-12 border-4 border-[#4CAF50] border-t-transparent rounded-full animate-spin mb-4"></div>
+        <p className="text-[#8D6E63]">Memuat data Pakanku...</p>
+      </div>
+    );
   }
 
   const AuthView = () => {
@@ -234,7 +251,7 @@ export default function App() {
           });
         }
       } catch (err) {
-        setError(err.message.replace('Firebase:', ''));
+        setError(err.message.replace('Firebase:', '').trim());
       }
       setLoading(false);
     };
@@ -249,8 +266,8 @@ export default function App() {
         </div>
         <h1 className="text-4xl font-bold mb-1 z-10 text-white">Pakanku</h1>
         
-        {/* PENAMBAHAN NAMA PEMBUAT */}
-        <p className="text-sm font-bold text-[#FFF8E1] z-10 mb-4 tracking-wider drop-shadow-md">
+        {/* TEXT WAJIB SESUAI INSTRUKSI */}
+        <p className="text-sm font-bold text-[#FFF8E1] z-10 mb-4 tracking-wider drop-shadow-md bg-black/20 px-4 py-1 rounded-full">
           Created by : M. Raihan
         </p>
 
@@ -296,7 +313,7 @@ export default function App() {
 
           <p className="text-center text-sm font-medium text-[#8D6E63] mt-4">
             {isLogin ? "Belum punya akun?" : "Sudah punya akun?"} 
-            <button onClick={() => { setIsLogin(!isLogin); setError(''); }} className="text-[#4CAF50] font-bold ml-1 hover:underline">
+            <button type="button" onClick={() => { setIsLogin(!isLogin); setError(''); }} className="text-[#4CAF50] font-bold ml-1 hover:underline">
               {isLogin ? 'Daftar' : 'Masuk'}
             </button>
           </p>
@@ -331,7 +348,10 @@ export default function App() {
           <span className="bg-[#4CAF50] w-1.5 h-6 rounded-full"></span> Pilihan Peternak
         </h3>
         {products.length === 0 ? (
-          <div className="text-center text-[#8D6E63] mt-10 opacity-70 font-medium">Belum ada produk pakan tersedia.</div>
+          <div className="text-center text-[#8D6E63] mt-10 opacity-70 font-medium flex flex-col items-center">
+            <Package size={40} className="mb-2 opacity-50" />
+            Belum ada produk pakan tersedia.
+          </div>
         ) : (
           <div className="grid grid-cols-2 gap-3">
             {products.map(product => (
@@ -363,8 +383,11 @@ export default function App() {
         )}
       </div>
 
-      <div className="mt-8 mb-6 text-center text-xs text-[#8D6E63] font-bold tracking-widest opacity-60">
-        CREATED BY: M. RAIHAN
+      {/* TEXT WAJIB SESUAI INSTRUKSI */}
+      <div className="mt-8 mb-6 flex justify-center">
+        <span className="bg-[#4CAF50]/10 text-[#4CAF50] border border-[#4CAF50]/20 px-4 py-2 rounded-full text-xs font-bold tracking-widest shadow-sm">
+          CREATED BY : M. RAIHAN
+        </span>
       </div>
     </div>
   );
@@ -413,19 +436,19 @@ export default function App() {
             </div>
           </div>
 
-          <div className="bg-white p-5 shadow-sm border-t border-[#8D6E63]/20">
+          <div className="bg-white p-5 shadow-sm border-t border-[#8D6E63]/20 min-h-[200px]">
             <h3 className="font-bold text-[#5D4037] mb-3 text-lg">Deskripsi Pakan</h3>
             <p className="text-sm text-[#8D6E63] leading-relaxed whitespace-pre-line font-medium">{selectedProduct.desc}</p>
           </div>
         </div>
 
-        {userProfile?.role === 'buyer' && (
+        {(!userProfile || userProfile?.role === 'buyer') && (
           <div className="bg-white border-t border-[#8D6E63]/20 p-3 flex gap-2 fixed bottom-0 w-full shadow-[0_-8px_15px_-3px_rgba(0,0,0,0.05)] z-30">
-            <button disabled={isOutOfStock} onClick={() => addToCart(selectedProduct)}
+            <button disabled={isOutOfStock} onClick={() => { if(!user) showToast('Harap login terlebih dahulu'); else addToCart(selectedProduct); }}
               className={`flex-1 font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 transition border-2 ${isOutOfStock ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-[#4CAF50]/10 text-[#4CAF50] border-[#4CAF50]/30 hover:bg-[#4CAF50]/20'}`}>
               <ShoppingCart size={20} /> Keranjang
             </button>
-            <button disabled={isOutOfStock} onClick={() => { addToCart(selectedProduct); if(!isOutOfStock) navigateTo('main', 'cart'); }}
+            <button disabled={isOutOfStock} onClick={() => { if(!user) showToast('Harap login terlebih dahulu'); else { addToCart(selectedProduct); if(!isOutOfStock) navigateTo('main', 'cart'); } }}
               className={`flex-1 font-bold py-3.5 rounded-xl shadow-md transition ${isOutOfStock ? 'bg-gray-300 text-white cursor-not-allowed' : 'bg-[#4CAF50] text-white hover:bg-[#388E3C]'}`}>
               Beli Sekarang
             </button>
@@ -496,6 +519,7 @@ export default function App() {
 
   const CheckoutView = () => {
     const [method, setMethod] = useState('COD');
+    const [transferBank, setTransferBank] = useState('');
     const [courier, setCourier] = useState('JNE');
     const [isCheckingOut, setIsCheckingOut] = useState(false);
     const [sellerBanks, setSellerBanks] = useState([]);
@@ -506,19 +530,23 @@ export default function App() {
     const ongkir = ongkirMap[courier];
     const total = subtotal + ongkir;
 
-    // Fetch Seller Banks jika metode adalah Transfer Bank
+    // Fetch detail seller jika pakai Transfer Bank
     useEffect(() => {
       const fetchSellerBanks = async () => {
         if (method !== 'Transfer Bank') return;
         const uniqueSellerIds = [...new Set(cart.map(c => c.sellerId))];
         const banks = [];
         for (let sId of uniqueSellerIds) {
-          const sellerDoc = await getDoc(doc(db, 'users', sId));
-          if (sellerDoc.exists()) {
-            const sData = sellerDoc.data();
-            if (sData.bankName && sData.bankNumber) {
-              banks.push({ name: sData.name, bankName: sData.bankName, bankNumber: sData.bankNumber });
+          try {
+            const sellerDoc = await getDoc(doc(db, 'users', sId));
+            if (sellerDoc.exists()) {
+              const sData = sellerDoc.data();
+              if (sData.bankName && sData.bankNumber) {
+                banks.push({ name: sData.name, bankName: sData.bankName, bankNumber: sData.bankNumber });
+              }
             }
+          } catch(err) {
+            console.error("Gagal load bank penjual", err);
           }
         }
         setSellerBanks(banks);
@@ -531,11 +559,16 @@ export default function App() {
         showToast('Lengkapi alamat pengiriman di Profil Anda dulu!');
         return;
       }
+      if (method === 'Transfer Bank' && !transferBank) {
+        showToast('Pilih bank tujuan transfer!');
+        return;
+      }
+      
       setIsCheckingOut(true);
       try {
         const newOrderRef = doc(collection(db, 'orders'));
         
-        // Kurangi Stok Produk (Bug Fix: update stock)
+        // Kurangi Stok Produk dan Tambah Terjual
         for (const item of cart) {
           const productRef = doc(db, 'products', item.id);
           const currentProduct = products.find(p => p.id === item.id);
@@ -554,7 +587,7 @@ export default function App() {
           items: cart,
           total: total,
           status: 'Dikemas', 
-          paymentMethod: method,
+          paymentMethod: method === 'Transfer Bank' ? `Transfer Bank (${transferBank})` : 'COD',
           courier: courier,
           buyerId: user.uid,
           buyerName: userProfile.name,
@@ -563,11 +596,12 @@ export default function App() {
           sellerIds: [...new Set(cart.map(c => c.sellerId))]
         });
 
-        setCart([]);
+        setCart([]); // Kosongkan keranjang
         showToast('Pesanan berhasil dibuat!');
         navigateTo('main', 'orders');
       } catch (e) {
-        showToast('Gagal checkout: ' + e.message);
+        console.error("Error Checkout:", e);
+        showToast('Gagal checkout. Coba lagi.');
       }
       setIsCheckingOut(false);
     };
@@ -584,22 +618,23 @@ export default function App() {
           <div className="bg-white p-5 mb-2 shadow-sm border-b border-[#8D6E63]/20">
             <div className="flex justify-between items-center mb-3">
               <h3 className="font-bold text-[#5D4037] flex items-center gap-2"><MapPin size={20} className="text-[#4CAF50]" /> Alamat Pengiriman</h3>
-              <button onClick={() => navigateTo('main', 'profile')} className="text-xs text-[#4CAF50] font-bold">Ubah</button>
+              <button onClick={() => navigateTo('main', 'profile')} className="text-xs text-[#4CAF50] font-bold bg-[#4CAF50]/10 px-3 py-1 rounded-full">Ubah Profil</button>
             </div>
             {userProfile?.address ? (
-              <div className="bg-[#FFF8E1] p-4 rounded-xl border border-[#8D6E63]/30">
+              <div className="bg-[#FFF8E1] p-4 rounded-xl border border-[#8D6E63]/30 relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-1 h-full bg-[#4CAF50]"></div>
                 <p className="text-sm font-bold text-[#5D4037] mb-1">{userProfile.name} <span className="text-[#8D6E63] font-medium ml-2">({userProfile.phone})</span></p>
                 <p className="text-sm font-medium text-[#8D6E63] leading-relaxed mb-2">{userProfile.address}</p>
                 {userProfile.mapLink && (
-                  <a href={userProfile.mapLink} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-blue-600 font-bold bg-blue-50 px-2 py-1 rounded-md border border-blue-100">
-                    <Map size={12}/> Lihat di Maps
+                  <a href={userProfile.mapLink} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-blue-600 font-bold bg-blue-50 px-2 py-1 rounded-md border border-blue-100 hover:bg-blue-100 transition">
+                    <Map size={12}/> Buka di Maps
                   </a>
                 )}
               </div>
             ) : (
               <div className="bg-red-50 p-4 rounded-xl border border-red-200 flex flex-col gap-2">
-                <p className="text-sm text-red-600 font-bold">Alamat belum diisi!</p>
-                <button onClick={() => navigateTo('main', 'profile')} className="text-xs bg-red-600 text-white px-3 py-2 rounded-lg font-bold w-fit">Isi Alamat Sekarang</button>
+                <p className="text-sm text-red-600 font-bold flex items-center gap-1"><Info size={16}/> Alamat belum diisi!</p>
+                <button onClick={() => navigateTo('main', 'profile')} className="text-xs bg-red-600 text-white px-4 py-2 rounded-lg font-bold w-fit hover:bg-red-700 shadow-sm">Isi Alamat Sekarang</button>
               </div>
             )}
           </div>
@@ -627,24 +662,38 @@ export default function App() {
               {['COD', 'Transfer Bank'].map(m => (
                 <div key={m}>
                   <label className={`flex items-center gap-3 p-4 border-2 rounded-xl cursor-pointer transition shadow-sm ${method === m ? 'border-[#4CAF50] bg-[#4CAF50]/10' : 'border-[#8D6E63]/20 bg-white hover:border-[#8D6E63]/50'}`}>
-                    <input type="radio" checked={method === m} onChange={() => setMethod(m)} className="text-[#4CAF50] w-4 h-4 accent-[#4CAF50]" />
-                    <span className={`text-sm font-bold ${method === m ? 'text-[#388E3C]' : 'text-[#5D4037]'}`}>{m === 'COD' ? 'Bayar di Tempat (COD)' : 'Transfer Bank'}</span>
+                    <input type="radio" checked={method === m} onChange={() => { setMethod(m); setTransferBank(''); }} className="text-[#4CAF50] w-4 h-4 accent-[#4CAF50]" />
+                    <span className={`text-sm font-bold ${method === m ? 'text-[#388E3C]' : 'text-[#5D4037]'}`}>{m === 'COD' ? 'Bayar di Tempat (COD)' : 'Transfer Bank (Verifikasi Manual)'}</span>
                   </label>
                   
                   {method === 'Transfer Bank' && m === 'Transfer Bank' && (
-                    <div className="mt-3 p-4 bg-blue-50 border border-blue-100 rounded-xl text-sm text-blue-900 shadow-inner">
-                      <p className="font-bold mb-2">Silakan transfer ke Rekening Penjual:</p>
-                      {sellerBanks.length > 0 ? (
-                        sellerBanks.map((bank, idx) => (
-                          <div key={idx} className="mb-2 bg-white p-2 rounded border border-blue-100">
-                            <p className="text-xs text-blue-600 font-bold">{bank.name}</p>
-                            <p className="font-bold text-lg">{bank.bankName} - {bank.bankNumber}</p>
-                          </div>
-                        ))
-                      ) : (
-                        <p className="text-xs italic text-blue-600/80">Menyiapkan data rekening penjual...</p>
+                    <div className="mt-3 ml-2 pl-4 border-l-2 border-[#4CAF50]/30 space-y-3">
+                      <p className="text-xs font-bold text-[#8D6E63]">Pilih Bank Anda:</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        {['BCA', 'BRI', 'Mandiri', 'BNI'].map(bank => (
+                          <label key={bank} className={`flex items-center gap-2 p-2 border rounded-lg cursor-pointer ${transferBank === bank ? 'border-[#4CAF50] bg-[#4CAF50]/5 text-[#4CAF50]' : 'border-[#8D6E63]/20 text-[#5D4037]'}`}>
+                             <input type="radio" checked={transferBank === bank} onChange={() => setTransferBank(bank)} className="accent-[#4CAF50]" />
+                             <span className="text-xs font-bold">{bank}</span>
+                          </label>
+                        ))}
+                      </div>
+
+                      {transferBank && (
+                        <div className="mt-3 p-4 bg-blue-50 border border-blue-100 rounded-xl text-sm text-blue-900 shadow-inner">
+                          <p className="font-bold mb-2 flex items-center gap-1"><Info size={14}/> Rekening Tujuan (Penjual):</p>
+                          {sellerBanks.length > 0 ? (
+                            sellerBanks.map((bank, idx) => (
+                              <div key={idx} className="mb-2 bg-white p-3 rounded-lg border border-blue-100 shadow-sm">
+                                <p className="text-xs text-blue-600 font-bold mb-1">Toko: {bank.name}</p>
+                                <p className="font-bold text-lg text-gray-800">{bank.bankName} - {bank.bankNumber}</p>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-xs italic text-blue-600/80">Menyiapkan data rekening penjual...</p>
+                          )}
+                          <p className="text-xs mt-2 opacity-80">* Hubungi penjual setelah checkout untuk bukti transfer.</p>
+                        </div>
                       )}
-                      <p className="text-xs mt-2 opacity-80">* Lakukan pembayaran agar pesanan diproses.</p>
                     </div>
                   )}
                 </div>
@@ -670,7 +719,10 @@ export default function App() {
             <p className="text-xs font-medium text-[#8D6E63] mb-0.5">Total Bayar</p>
             <p className="text-xl font-bold text-[#4CAF50]">{formatRp(total)}</p>
           </div>
-          <button disabled={isCheckingOut || !userProfile?.address} onClick={handleCheckout} className="bg-[#4CAF50] disabled:bg-gray-400 text-white px-8 py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition flex items-center gap-2">
+          <button 
+            disabled={isCheckingOut || !userProfile?.address || (method === 'Transfer Bank' && !transferBank)} 
+            onClick={handleCheckout} 
+            className="bg-[#4CAF50] disabled:bg-gray-400 text-white px-8 py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition flex items-center gap-2">
             {isCheckingOut ? 'Memproses...' : 'Buat Pesanan'}
           </button>
         </div>
@@ -681,7 +733,7 @@ export default function App() {
   const OrdersTab = () => {
     const isSeller = userProfile?.role === 'seller';
     
-    // Filter pesanan sesuai role
+    // Filter pesanan sesuai role secara real-time
     let filteredOrders = orders;
     if (isSeller) {
       filteredOrders = orders.filter(o => o.sellerIds && o.sellerIds.includes(user.uid));
@@ -706,10 +758,16 @@ export default function App() {
         
         <div className="flex-1 overflow-y-auto p-4 pb-24 space-y-4">
           {filteredOrders.length === 0 ? (
-            <div className="text-center text-[#8D6E63] mt-16 font-medium">Belum ada pesanan masuk.</div>
+            <div className="flex flex-col items-center justify-center text-[#8D6E63] mt-20 opacity-70">
+              <Package size={60} className="mb-4" />
+              <p className="font-medium text-lg">Belum ada pesanan.</p>
+            </div>
           ) : (
             filteredOrders.map(order => (
-              <div key={order.id} className="bg-white rounded-2xl p-5 shadow-sm border border-[#8D6E63]/20">
+              <div key={order.id} className="bg-white rounded-2xl p-5 shadow-sm border border-[#8D6E63]/20 relative overflow-hidden">
+                {/* Garis warna berdasarkan status */}
+                <div className={`absolute left-0 top-0 w-1 h-full ${order.status === 'Sampai' ? 'bg-[#4CAF50]' : order.status === 'Dikirim' ? 'bg-blue-500' : 'bg-yellow-400'}`}></div>
+                
                 <div className="flex justify-between items-center mb-3 pb-3 border-b border-[#8D6E63]/20">
                   <div className="flex items-center gap-2">
                     <Store size={18} className="text-[#8D6E63]" />
@@ -739,11 +797,11 @@ export default function App() {
                   <p><span className="font-bold text-[#5D4037]">Pembayaran:</span> {order.paymentMethod}</p>
                   {isSeller && (
                     <div className="mt-2 pt-2 border-t border-[#8D6E63]/20">
-                      <p className="font-bold text-[#5D4037]">Alamat Pengiriman:</p>
-                      <p className="mt-0.5">{order.address}</p>
+                      <p className="font-bold text-[#5D4037] mb-1">Alamat Pengiriman:</p>
+                      <p className="leading-relaxed bg-white p-2 rounded-lg border border-[#8D6E63]/20 text-xs">{order.address}</p>
                       {order.mapLink && (
-                        <a href={order.mapLink} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[10px] text-blue-600 font-bold bg-blue-100 px-2 py-1 rounded border border-blue-200 mt-1 hover:bg-blue-200">
-                          <Map size={10}/> Buka di Maps
+                        <a href={order.mapLink} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[10px] text-blue-600 font-bold bg-blue-100 px-2 py-1.5 rounded-lg border border-blue-200 mt-2 hover:bg-blue-200 transition">
+                          <Map size={12}/> Buka di Google Maps
                         </a>
                       )}
                     </div>
@@ -758,14 +816,14 @@ export default function App() {
                 {/* SELLER ACTION: Dikemas -> Dikirim */}
                 {isSeller && order.status === 'Dikemas' && (
                   <div className="mt-4 flex gap-2">
-                    <button onClick={() => updateStatus(order.id, 'Dikirim')} className="flex-1 bg-[#4CAF50] text-white py-2.5 rounded-xl text-sm font-bold shadow hover:bg-[#388E3C] transition">Tandai Sudah Dikirim</button>
+                    <button onClick={() => updateStatus(order.id, 'Dikirim')} className="flex-1 bg-[#4CAF50] text-white py-2.5 rounded-xl text-sm font-bold shadow-md hover:bg-[#388E3C] transition">Tandai Sudah Dikirim</button>
                   </div>
                 )}
                 
                 {/* BUYER ACTION: Dikirim -> Sampai */}
                 {!isSeller && order.status === 'Dikirim' && (
                   <div className="mt-4 flex gap-2">
-                    <button onClick={() => updateStatus(order.id, 'Sampai')} className="flex-1 bg-[#4CAF50] text-white py-2.5 rounded-xl text-sm font-bold shadow hover:bg-[#388E3C] transition">Pesanan Diterima</button>
+                    <button onClick={() => updateStatus(order.id, 'Sampai')} className="flex-1 bg-[#4CAF50] text-white py-2.5 rounded-xl text-sm font-bold shadow-md hover:bg-[#388E3C] transition">Konfirmasi Pesanan Diterima</button>
                   </div>
                 )}
               </div>
@@ -782,6 +840,7 @@ export default function App() {
     const [isUploading, setIsUploading] = useState(false);
     const [formProd, setFormProd] = useState({ name: '', price: '', stock: '', category: 'Ayam', desc: '', image: '' });
 
+    // Produk yang dimiliki penjual ini
     const myProducts = products.filter(p => p.sellerId === user.uid);
 
     const handleFileSelect = async (e) => {
@@ -811,8 +870,8 @@ export default function App() {
           image: formProd.image,
           sellerId: user.uid,
           sellerName: userProfile.name,
-          rating: formProd.rating || 0,
-          sold: formProd.sold || 0
+          rating: formProd.rating || 0, // rating awal
+          sold: formProd.sold || 0      // terjual awal
         };
 
         if (editId) {
@@ -826,14 +885,19 @@ export default function App() {
         setEditId(null);
         setFormProd({ name: '', price: '', stock: '', category: 'Ayam', desc: '', image: '' });
       } catch (e) {
-        showToast('Gagal menyimpan: ' + e.message);
+        console.error(e);
+        showToast('Gagal menyimpan produk.');
       }
     };
 
     const handleDeleteProduct = async (id) => {
       if(confirm('Yakin ingin menghapus produk ini secara permanen?')) {
-        await deleteDoc(doc(db, 'products', id));
-        showToast('Produk dihapus!');
+        try {
+          await deleteDoc(doc(db, 'products', id));
+          showToast('Produk dihapus!');
+        } catch(err) {
+          showToast('Gagal menghapus produk.');
+        }
       }
     };
 
@@ -846,20 +910,21 @@ export default function App() {
     if (isAdding) {
       return (
         <div className="flex flex-col h-screen bg-[#FFF8E1] p-4 pb-24 overflow-y-auto">
-          <div className="flex items-center mb-6">
-            <button onClick={() => { setIsAdding(false); setEditId(null); }} className="text-[#8D6E63] p-2 bg-white rounded-full shadow"><ChevronLeft /></button>
+          <div className="flex items-center mb-6 sticky top-0 z-10 bg-[#FFF8E1] pt-2 pb-2">
+            <button onClick={() => { setIsAdding(false); setEditId(null); }} className="text-[#8D6E63] p-2 bg-white rounded-full shadow-md hover:bg-gray-50"><ChevronLeft /></button>
             <h2 className="text-xl font-bold text-[#5D4037] ml-4">{editId ? 'Edit Pakan' : 'Tambah Pakan Baru'}</h2>
           </div>
           
           <form onSubmit={handleSubmitProduct} className="space-y-4 bg-white p-5 rounded-2xl shadow-sm border border-[#8D6E63]/20">
             {/* Supabase Image Upload Area */}
-            <div className="flex flex-col items-center justify-center border-2 border-dashed border-[#8D6E63]/30 rounded-xl p-4 bg-[#FFF8E1]/50 relative overflow-hidden">
+            <div className="flex flex-col items-center justify-center border-2 border-dashed border-[#8D6E63]/30 rounded-xl p-4 bg-[#FFF8E1]/50 relative overflow-hidden group hover:border-[#4CAF50] transition">
               {formProd.image ? (
                 <img src={formProd.image} alt="Preview" className="w-full h-32 object-contain" />
               ) : (
                 <div className="text-center text-[#8D6E63]">
-                  <Upload className="mx-auto mb-2 opacity-50" size={32}/>
-                  <span className="text-xs font-bold">Upload Foto Pakan (Supabase)</span>
+                  <Upload className="mx-auto mb-2 opacity-50 group-hover:text-[#4CAF50] group-hover:opacity-100 transition" size={32}/>
+                  <span className="text-xs font-bold block">Upload Foto Pakan</span>
+                  <span className="text-[10px] opacity-70">(Langsung ke Supabase)</span>
                 </div>
               )}
               {isUploading && <div className="absolute inset-0 bg-white/80 flex items-center justify-center font-bold text-[#4CAF50]"><div className="w-5 h-5 border-2 border-[#4CAF50] border-t-transparent rounded-full animate-spin mr-2"></div> Uploading...</div>}
@@ -868,29 +933,31 @@ export default function App() {
 
             <div>
               <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Nama Pakan</label>
-              <input required type="text" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037]" value={formProd.name} onChange={e => setFormProd({...formProd, name: e.target.value})} />
+              <input required type="text" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] font-medium" value={formProd.name} onChange={e => setFormProd({...formProd, name: e.target.value})} />
             </div>
             <div className="flex gap-4">
               <div className="flex-1">
                 <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Harga (Rp)</label>
-                <input required type="number" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037]" value={formProd.price} onChange={e => setFormProd({...formProd, price: e.target.value})} />
+                <input required type="number" min="0" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] font-medium" value={formProd.price} onChange={e => setFormProd({...formProd, price: e.target.value})} />
               </div>
               <div className="flex-1">
                 <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Stok Tersedia</label>
-                <input required type="number" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037]" value={formProd.stock} onChange={e => setFormProd({...formProd, stock: e.target.value})} />
+                <input required type="number" min="0" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] font-medium" value={formProd.stock} onChange={e => setFormProd({...formProd, stock: e.target.value})} />
               </div>
             </div>
             <div>
               <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Kategori Hewan</label>
-              <select className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037]" value={formProd.category} onChange={e => setFormProd({...formProd, category: e.target.value})}>
+              <select className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] font-medium" value={formProd.category} onChange={e => setFormProd({...formProd, category: e.target.value})}>
                 {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
               </select>
             </div>
             <div>
               <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Deskripsi Lengkap</label>
-              <textarea required rows="3" className="w-full border border-[#8D6E63]/30 rounded-xl p-3 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm mt-1" value={formProd.desc} onChange={e => setFormProd({...formProd, desc: e.target.value})}></textarea>
+              <textarea required rows="4" className="w-full border border-[#8D6E63]/30 rounded-xl p-3 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm mt-1 font-medium bg-[#FFF8E1]/30" value={formProd.desc} onChange={e => setFormProd({...formProd, desc: e.target.value})}></textarea>
             </div>
-            <button disabled={isUploading} type="submit" className="w-full bg-[#4CAF50] disabled:bg-gray-400 text-white py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition mt-2">Simpan Pakan</button>
+            <button disabled={isUploading} type="submit" className="w-full bg-[#4CAF50] disabled:bg-gray-400 text-white py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition mt-4 flex items-center justify-center gap-2">
+              <Check size={18}/> Simpan Pakan
+            </button>
           </form>
         </div>
       );
@@ -900,36 +967,45 @@ export default function App() {
       <div className="flex flex-col h-screen bg-[#FFF8E1]">
         <div className="bg-[#4CAF50] text-white p-4 flex justify-between items-center shadow-sm sticky top-0 z-10 rounded-b-2xl">
           <h1 className="font-bold text-lg">Kelola Toko Saya</h1>
-          <button onClick={() => setIsAdding(true)} className="bg-white text-[#4CAF50] px-3 py-1.5 rounded-full text-xs font-bold shadow flex items-center gap-1"><Plus size={14}/> Tambah</button>
+          <button onClick={() => setIsAdding(true)} className="bg-white text-[#4CAF50] px-3 py-1.5 rounded-full text-xs font-bold shadow-md hover:bg-gray-50 flex items-center gap-1"><Plus size={14}/> Tambah</button>
         </div>
         
         <div className="flex-1 overflow-y-auto p-4 pb-24 space-y-4">
-          <div className="bg-white p-4 rounded-2xl shadow-sm border border-[#8D6E63]/20 flex items-center gap-4">
+          <div className="bg-white p-4 rounded-2xl shadow-sm border border-[#8D6E63]/20 flex items-center gap-4 relative overflow-hidden">
+            <div className="absolute left-0 top-0 w-2 h-full bg-[#4CAF50]"></div>
             {userProfile?.photoProfile ? (
-               <img src={userProfile.photoProfile} alt="Toko" className="w-12 h-12 rounded-full object-cover border border-[#4CAF50]" />
+               <img src={userProfile.photoProfile} alt="Toko" className="w-14 h-14 rounded-full object-cover border-2 border-[#4CAF50] shadow-sm ml-2" />
             ) : (
-               <div className="w-12 h-12 bg-[#FFF8E1] rounded-full flex items-center justify-center text-[#8D6E63] border border-[#8D6E63]/30"><Store /></div>
+               <div className="w-14 h-14 bg-[#FFF8E1] rounded-full flex items-center justify-center text-[#8D6E63] border border-[#8D6E63]/30 ml-2"><Store size={24} /></div>
             )}
             <div>
-              <h3 className="font-bold text-[#5D4037]">{userProfile?.name}</h3>
-              <p className="text-xs text-[#8D6E63]">{myProducts.length} Produk Pakan Aktif</p>
+              <h3 className="font-bold text-[#5D4037] text-lg leading-tight">{userProfile?.name}</h3>
+              <p className="text-xs text-[#8D6E63] font-medium">{myProducts.length} Produk Pakan Aktif</p>
             </div>
           </div>
 
-          <h3 className="font-bold text-[#5D4037] mt-6 mb-2">Daftar Pakan yang Dijual</h3>
+          <h3 className="font-bold text-[#5D4037] mt-6 mb-2 flex items-center gap-2"><Package size={18}/> Daftar Pakan yang Dijual</h3>
           {myProducts.length === 0 ? (
-            <p className="text-center text-[#8D6E63] mt-8 text-sm bg-white p-6 rounded-2xl border border-dashed border-[#8D6E63]/30">Belum ada produk jualan. Tambahkan pakan pertamamu sekarang!</p>
+            <div className="text-center text-[#8D6E63] mt-8 text-sm bg-white p-8 rounded-2xl border-2 border-dashed border-[#8D6E63]/30 flex flex-col items-center gap-3">
+              <Package size={40} className="opacity-30" />
+              <p>Belum ada produk jualan.<br/>Tambahkan pakan pertamamu sekarang!</p>
+            </div>
           ) : (
             myProducts.map(prod => (
               <div key={prod.id} className="bg-white p-4 rounded-2xl shadow-sm border border-[#8D6E63]/20 flex gap-4">
-                 <img src={prod.image} alt={prod.name} className="w-20 h-20 rounded-xl object-cover border border-[#FFF8E1] bg-gray-50" />
-                 <div className="flex-1">
-                   <h4 className="text-sm font-bold text-[#5D4037] line-clamp-1">{prod.name}</h4>
-                   <p className="text-[#4CAF50] font-bold text-sm mb-1">{formatRp(prod.price)}</p>
-                   <p className="text-xs text-[#8D6E63] mb-2">Sisa Stok: <span className="font-bold">{prod.stock}</span></p>
+                 <img src={prod.image} alt={prod.name} className="w-20 h-20 rounded-xl object-cover border border-[#FFF8E1] bg-gray-50 shadow-sm" />
+                 <div className="flex-1 flex flex-col justify-between">
+                   <div>
+                     <h4 className="text-sm font-bold text-[#5D4037] line-clamp-1">{prod.name}</h4>
+                     <p className="text-[#4CAF50] font-bold text-sm mb-1">{formatRp(prod.price)}</p>
+                   </div>
+                   <div className="flex items-center justify-between mb-2">
+                     <p className="text-[11px] text-[#8D6E63] bg-[#FFF8E1] px-2 py-0.5 rounded-md border border-[#8D6E63]/20">Stok: <span className="font-bold">{prod.stock}</span></p>
+                     <p className="text-[11px] text-[#8D6E63]">Terjual: {prod.sold || 0}</p>
+                   </div>
                    <div className="flex gap-2">
-                     <button onClick={() => handleEdit(prod)} className="flex-1 bg-[#FFF8E1] text-[#8D6E63] py-1.5 rounded-lg text-xs font-bold border border-[#8D6E63]/30 flex items-center justify-center gap-1"><Edit2 size={12}/> Edit</button>
-                     <button onClick={() => handleDeleteProduct(prod.id)} className="bg-red-50 text-red-500 px-3 rounded-lg border border-red-100 flex items-center justify-center hover:bg-red-100"><Trash2 size={14}/></button>
+                     <button onClick={() => handleEdit(prod)} className="flex-1 bg-[#FFF8E1] text-[#8D6E63] py-1.5 rounded-lg text-xs font-bold border border-[#8D6E63]/30 flex items-center justify-center gap-1 hover:bg-[#8D6E63]/10 transition"><Edit2 size={12}/> Edit</button>
+                     <button onClick={() => handleDeleteProduct(prod.id)} className="bg-red-50 text-red-500 px-3 rounded-lg border border-red-100 flex items-center justify-center hover:bg-red-100 transition"><Trash2 size={14}/></button>
                    </div>
                  </div>
               </div>
@@ -967,6 +1043,7 @@ export default function App() {
       const url = await uploadToSupabase(file);
       if (url) {
         setEditData({ ...editData, photoProfile: url });
+        showToast('Foto berhasil diunggah!');
       }
       setIsUploading(false);
     };
@@ -978,6 +1055,7 @@ export default function App() {
         showToast('Profil berhasil diperbarui!');
         setIsEditing(false);
       } catch (err) {
+        console.error(err);
         showToast('Gagal update profil');
       }
     };
@@ -985,43 +1063,43 @@ export default function App() {
     if (isEditing) {
       return (
         <div className="flex flex-col h-screen bg-[#FFF8E1] p-6 pb-24 overflow-y-auto">
-          <div className="flex items-center mb-6">
-            <button onClick={() => setIsEditing(false)} className="text-[#8D6E63] p-2 bg-white rounded-full shadow"><ChevronLeft /></button>
+          <div className="flex items-center mb-6 sticky top-0 bg-[#FFF8E1] py-2 z-10">
+            <button onClick={() => setIsEditing(false)} className="text-[#8D6E63] p-2 bg-white rounded-full shadow-md"><ChevronLeft /></button>
             <h2 className="text-xl font-bold text-[#5D4037] ml-4">Pengaturan Profil</h2>
           </div>
 
           <form onSubmit={saveProfile} className="space-y-4 bg-white p-5 rounded-3xl shadow-sm border border-[#8D6E63]/20">
             {/* Foto Profil Supabase */}
             <div className="flex flex-col items-center mb-4 relative">
-               <div className="w-24 h-24 bg-gray-100 rounded-full overflow-hidden border-4 border-[#4CAF50] relative">
+               <div className="w-24 h-24 bg-gray-100 rounded-full overflow-hidden border-4 border-[#4CAF50] relative shadow-md">
                   {editData.photoProfile ? (
                     <img src={editData.photoProfile} alt="Profil" className="w-full h-full object-cover" />
                   ) : (
                     <UserIcon size={40} className="text-[#8D6E63] absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2" />
                   )}
-                  {isUploading && <div className="absolute inset-0 bg-black/50 flex items-center justify-center"><div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div></div>}
+                  {isUploading && <div className="absolute inset-0 bg-black/60 flex items-center justify-center"><div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div></div>}
                </div>
-               <label className="mt-2 text-xs text-[#4CAF50] font-bold cursor-pointer bg-[#4CAF50]/10 px-3 py-1.5 rounded-full border border-[#4CAF50]/30">
-                  Ubah Foto Profil
+               <label className="mt-3 text-xs text-[#4CAF50] font-bold cursor-pointer bg-[#4CAF50]/10 px-4 py-2 rounded-full border border-[#4CAF50]/30 hover:bg-[#4CAF50]/20 transition flex items-center gap-2">
+                  <Upload size={14}/> Ubah Foto Profil
                   <input type="file" accept="image/*" className="hidden" onChange={handleProfileUpload} disabled={isUploading} />
                </label>
             </div>
 
             <div>
               <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Nama Lengkap / Toko</label>
-              <input required type="text" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037]" value={editData.name} onChange={e => setEditData({...editData, name: e.target.value})} />
+              <input required type="text" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] font-medium" value={editData.name} onChange={e => setEditData({...editData, name: e.target.value})} />
             </div>
             <div>
               <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Nomor WhatsApp Aktif</label>
-              <input required type="text" placeholder="08123456789" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037]" value={editData.phone} onChange={e => setEditData({...editData, phone: e.target.value})} />
+              <input required type="text" placeholder="08123456789" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] font-medium" value={editData.phone} onChange={e => setEditData({...editData, phone: e.target.value})} />
             </div>
             <div>
-              <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Alamat Lengkap</label>
-              <textarea required rows="2" placeholder="Jl. Raya Peternak No.12..." className="w-full border border-[#8D6E63]/30 rounded-xl p-3 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm mt-1" value={editData.address} onChange={e => setEditData({...editData, address: e.target.value})}></textarea>
+              <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Alamat Lengkap Pengiriman</label>
+              <textarea required rows="3" placeholder="Jl. Raya Peternak No.12, RT/RW, Kecamatan, Kota..." className="w-full border border-[#8D6E63]/30 rounded-xl p-3 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm mt-1 font-medium bg-[#FFF8E1]/30" value={editData.address} onChange={e => setEditData({...editData, address: e.target.value})}></textarea>
             </div>
             <div>
               <label className="text-xs font-bold text-[#8D6E63] mb-1 block">Link Google Maps (Opsional)</label>
-              <input type="url" placeholder="https://maps.app.goo.gl/..." className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm" value={editData.mapLink} onChange={e => setEditData({...editData, mapLink: e.target.value})} />
+              <input type="url" placeholder="https://maps.app.goo.gl/..." className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm font-medium" value={editData.mapLink} onChange={e => setEditData({...editData, mapLink: e.target.value})} />
             </div>
 
             {/* Khusus Penjual: Rekening Bank */}
@@ -1031,7 +1109,7 @@ export default function App() {
                 <div className="flex gap-3 mb-3">
                   <div className="flex-1">
                     <label className="text-[10px] font-bold text-[#8D6E63] block mb-1">Pilih Bank</label>
-                    <select className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm" value={editData.bankName} onChange={e => setEditData({...editData, bankName: e.target.value})}>
+                    <select className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm font-medium bg-white" value={editData.bankName} onChange={e => setEditData({...editData, bankName: e.target.value})}>
                       <option value="">Pilih...</option>
                       <option value="BCA">BCA</option>
                       <option value="Mandiri">Mandiri</option>
@@ -1041,13 +1119,15 @@ export default function App() {
                   </div>
                   <div className="flex-[2]">
                     <label className="text-[10px] font-bold text-[#8D6E63] block mb-1">Nomor Rekening</label>
-                    <input type="number" placeholder="Contoh: 1234567890" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm" value={editData.bankNumber} onChange={e => setEditData({...editData, bankNumber: e.target.value})} />
+                    <input type="number" placeholder="Contoh: 1234567890" className="w-full border-b border-[#8D6E63]/30 py-2 focus:outline-none focus:border-[#4CAF50] text-[#5D4037] text-sm font-medium" value={editData.bankNumber} onChange={e => setEditData({...editData, bankNumber: e.target.value})} />
                   </div>
                 </div>
               </div>
             )}
 
-            <button disabled={isUploading} type="submit" className="w-full bg-[#4CAF50] disabled:bg-gray-400 text-white py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition mt-6">Simpan Perubahan</button>
+            <button disabled={isUploading} type="submit" className="w-full bg-[#4CAF50] disabled:bg-gray-400 text-white py-3.5 rounded-xl font-bold shadow-md hover:bg-[#388E3C] transition mt-6 flex items-center justify-center gap-2">
+              <Check size={18}/> Simpan Perubahan
+            </button>
           </form>
         </div>
       )
@@ -1072,11 +1152,11 @@ export default function App() {
           </div>
           <div>
             <p className="text-[10px] uppercase font-bold text-[#8D6E63] mb-0.5">Telepon (WA)</p>
-            <p className="text-sm text-[#5D4037] font-medium">{userProfile?.phone || <span className="text-red-400 italic">Belum diisi</span>}</p>
+            <p className="text-sm text-[#5D4037] font-medium">{userProfile?.phone || <span className="text-red-400 italic font-normal">Belum diisi</span>}</p>
           </div>
           <div>
             <p className="text-[10px] uppercase font-bold text-[#8D6E63] mb-0.5">Alamat Pengiriman/Toko</p>
-            <p className="text-sm text-[#5D4037] font-medium leading-relaxed mb-1">{userProfile?.address || <span className="text-red-400 italic">Belum diisi</span>}</p>
+            <p className="text-sm text-[#5D4037] font-medium leading-relaxed mb-1">{userProfile?.address || <span className="text-red-400 italic font-normal">Belum diisi</span>}</p>
             {userProfile?.mapLink && (
               <a href={userProfile.mapLink} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[10px] text-blue-600 font-bold bg-blue-50 px-2 py-1 rounded border border-blue-100 hover:bg-blue-100 transition">
                 <Map size={12}/> Lihat Titik Lokasi
@@ -1088,7 +1168,7 @@ export default function App() {
             <div className="pt-3 border-t border-[#8D6E63]/20">
                <p className="text-[10px] uppercase font-bold text-[#8D6E63] mb-0.5">Rekening Bank Penjualan</p>
                <p className="text-sm text-[#5D4037] font-medium">
-                  {userProfile?.bankName && userProfile?.bankNumber ? `${userProfile.bankName} - ${userProfile.bankNumber}` : <span className="text-red-400 italic">Data bank belum diisi</span>}
+                  {userProfile?.bankName && userProfile?.bankNumber ? `${userProfile.bankName} - ${userProfile.bankNumber}` : <span className="text-red-400 italic font-normal">Data bank belum diisi</span>}
                </p>
             </div>
           )}
@@ -1098,7 +1178,7 @@ export default function App() {
           </button>
         </div>
         
-        <button onClick={() => signOut(auth)} className="w-full max-w-xs bg-white border border-red-200 text-red-500 py-3.5 rounded-2xl font-bold shadow-sm hover:bg-red-50 hover:text-red-600 transition flex items-center justify-center gap-2">
+        <button onClick={() => { signOut(auth); setCart([]); setOrders([]); }} className="w-full max-w-xs bg-white border border-red-200 text-red-500 py-3.5 rounded-2xl font-bold shadow-sm hover:bg-red-50 hover:text-red-600 transition flex items-center justify-center gap-2">
           <LogOut size={18}/> Keluar Aplikasi
         </button>
       </div>
@@ -1127,25 +1207,25 @@ export default function App() {
         {activeView === 'checkout' && <CheckoutView />}
       </div>
 
-      {/* BOTTOM NAVIGATION (Hanya tampil di main views) */}
+      {/* BOTTOM NAVIGATION (Hanya tampil di main views jika sudah login, atau di home walau belum login) */}
       {activeView === 'main' && (
         <div className="bg-white border-t border-[#8D6E63]/20 flex justify-around p-2 pb-4 shadow-[0_-5px_20px_-5px_rgba(0,0,0,0.1)] z-40 rounded-t-3xl">
-          {userProfile?.role === 'buyer' ? (
+          {(!userProfile || userProfile?.role === 'buyer') ? (
             <>
               <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'home' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <Home size={24} className={activeTab==='home'?'fill-[#4CAF50]/20':''} />
                 <span className="text-[10px] font-bold mt-1">Beranda</span>
               </button>
-              <button onClick={() => setActiveTab('cart')} className={`flex flex-col items-center p-2 relative transition-all ${activeTab === 'cart' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
+              <button onClick={() => { if(!user) showToast('Harap Login'); else setActiveTab('cart'); }} className={`flex flex-col items-center p-2 relative transition-all ${activeTab === 'cart' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <ShoppingCart size={24} className={activeTab==='cart'?'fill-[#4CAF50]/20':''} />
-                {cart.length > 0 && <span className="absolute top-1 right-1 bg-red-500 text-white text-[10px] w-4 h-4 flex items-center justify-center rounded-full font-bold">{cart.length}</span>}
+                {cart.length > 0 && <span className="absolute top-1 right-1 bg-red-500 text-white text-[10px] w-4 h-4 flex items-center justify-center rounded-full font-bold shadow-sm">{cart.length}</span>}
                 <span className="text-[10px] font-bold mt-1">Keranjang</span>
               </button>
-              <button onClick={() => setActiveTab('orders')} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'orders' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
+              <button onClick={() => { if(!user) showToast('Harap Login'); else setActiveTab('orders'); }} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'orders' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <Package size={24} className={activeTab==='orders'?'fill-[#4CAF50]/20':''} />
                 <span className="text-[10px] font-bold mt-1">Pesanan</span>
               </button>
-              <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'profile' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
+              <button onClick={() => { if(!user) navigateTo('auth'); else setActiveTab('profile'); }} className={`flex flex-col items-center p-2 transition-all ${activeTab === 'profile' ? 'text-[#4CAF50] -translate-y-1' : 'text-[#8D6E63]'}`}>
                 <UserIcon size={24} className={activeTab==='profile'?'fill-[#4CAF50]/20':''} />
                 <span className="text-[10px] font-bold mt-1">Profil</span>
               </button>
