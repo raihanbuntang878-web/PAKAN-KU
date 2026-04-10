@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Home, ShoppingCart, User as UserIcon, Search, 
   Star, ChevronLeft, Plus, Minus, Trash2, Package, 
@@ -32,11 +32,13 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 // ==========================================
-// 2. SUPABASE CONFIGURATION (WAJIB)
+// 2. SUPABASE CONFIGURATION (DIPERBARUI)
 // ==========================================
 const supabaseUrl = 'https://yyuajrvowmdxgncaskfs.supabase.co';
 const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl5dWFqcnZvd21keGduY2Fza2ZzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU4MjE0MzEsImV4cCI6MjA5MTM5NzQzMX0.MxfraBhGajHchVMWI4qHz_kN1ufVmPq6STTXeudQ3RA';
-const supabaseBucket = 'pakanku-storage';
+
+// BUCKET TELAH DIPERBAIKI MENJADI 'images'
+const supabaseBucket = 'images'; 
 
 const categories = [
   { id: 'c1', name: 'Ayam', icon: '🐔' },
@@ -72,15 +74,16 @@ export default function App() {
     if (view === 'main') setActiveTab(tab);
   };
 
-  // --- SUPABASE UPLOAD FUNCTION ---
+  // --- SUPABASE UPLOAD FUNCTION (DIPERBARUI) ---
   const uploadToSupabase = async (file) => {
     if (!file) return null;
     try {
-      const fileExt = file.name.split('.').pop();
-      const fileName = `${Math.random().toString(36).substring(2, 15)}_${Date.now()}.${fileExt}`;
-      const filePath = `images/${fileName}`;
+      // Bersihkan nama file dari spasi atau karakter aneh yang bisa bikin error URL
+      const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '');
+      const fileName = `${Date.now()}-${safeName}`;
 
-      const res = await fetch(`${supabaseUrl}/storage/v1/object/${supabaseBucket}/${filePath}`, {
+      // Upload file menggunakan REST API fetch (Lebih stabil tanpa library external)
+      const res = await fetch(`${supabaseUrl}/storage/v1/object/${supabaseBucket}/${fileName}`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${supabaseKey}`,
@@ -90,12 +93,15 @@ export default function App() {
         body: file
       });
 
-      if (!res.ok) throw new Error('Upload failed');
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.message || 'Upload failed');
+      }
 
-      return `${supabaseUrl}/storage/v1/object/public/${supabaseBucket}/${filePath}`;
+      return `${supabaseUrl}/storage/v1/object/public/${supabaseBucket}/${fileName}`;
     } catch (err) {
-      console.error("Upload error:", err);
-      showToast('Gagal mengupload gambar ke Supabase.');
+      console.error("Upload exception:", err);
+      showToast('Terjadi kesalahan saat upload gambar.');
       return null;
     }
   };
@@ -241,7 +247,13 @@ export default function App() {
         <div className="w-24 h-24 bg-[#FFF8E1] rounded-full flex items-center justify-center mb-4 shadow-lg z-10">
           <Leaf className="text-[#4CAF50] w-12 h-12" />
         </div>
-        <h1 className="text-4xl font-bold mb-2 z-10 text-white">Pakanku</h1>
+        <h1 className="text-4xl font-bold mb-1 z-10 text-white">Pakanku</h1>
+        
+        {/* PENAMBAHAN NAMA PEMBUAT */}
+        <p className="text-sm font-bold text-[#FFF8E1] z-10 mb-4 tracking-wider drop-shadow-md">
+          Created by : M. Raihan
+        </p>
+
         <p className="mb-8 text-[#FFF8E1] text-center z-10">Marketplace Pakan Ternak<br/><span className="text-sm opacity-90">Dari Peternak, Untuk Peternak</span></p>
         
         <div className="w-full max-w-sm space-y-4 bg-[#FFF8E1] p-6 rounded-3xl shadow-2xl text-[#5D4037] z-10 border border-[#8D6E63]/20">
@@ -289,10 +301,6 @@ export default function App() {
             </button>
           </p>
         </div>
-
-        <p className="absolute bottom-6 text-center text-xs text-white/90 z-10 font-bold tracking-widest drop-shadow-md">
-          Created by: M. Raihan
-        </p>
       </div>
     );
   };
