@@ -18,9 +18,6 @@ import {
   deleteDoc, onSnapshot, getDoc 
 } from 'firebase/firestore';
 
-// === SUPABASE IMPORTS ===
-import { createClient } from '@supabase/supabase-js';
-
 // ==========================================
 // 1. FIREBASE CONFIGURATION (TIDAK DIUBAH)
 // ==========================================
@@ -48,7 +45,6 @@ setPersistence(auth, browserLocalPersistence).catch((error) => {
 // ==========================================
 const supabaseUrl = 'https://yyuajrvowmdxgncaskfs.supabase.co';
 const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl5dWFqcnZvd21keGduY2Fza2ZzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU4MjE0MzEsImV4cCI6MjA5MTM5NzQzMX0.MxfraBhGajHchVMWI4qHz_kN1ufVmPq6STTXeudQ3RA';
-const supabase = createClient(supabaseUrl, supabaseKey);
 
 const categories = [
   { id: 'c1', name: 'Ayam', icon: '🐔' },
@@ -84,27 +80,30 @@ export default function App() {
     if (view === 'main') setActiveTab(tab);
   };
 
-  // --- SUPABASE UPLOAD FUNCTION (MENGGUNAKAN SDK) ---
+  // --- SUPABASE UPLOAD FUNCTION ---
+  // Menggunakan Fetch API langsung ke REST endpoint Supabase agar stabil di semua environment
   const uploadToSupabase = async (file) => {
     if (!file) return null;
     try {
       const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '');
-      const fileName = Date.now() + "-" + safeName;
+      const fileName = `${Date.now()}-${safeName}`;
       
-      const { error } = await supabase.storage
-        .from("images")
-        .upload(fileName, file);
+      const res = await fetch(`${supabaseUrl}/storage/v1/object/images/${fileName}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${supabaseKey}`,
+          'apikey': supabaseKey,
+          'Content-Type': file.type
+        },
+        body: file
+      });
 
-      if (error) {
-        console.error("Supabase Upload Error:", error);
-        throw error;
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.message || 'Upload failed');
       }
 
-      const { data } = supabase.storage
-        .from("images")
-        .getPublicUrl(fileName);
-
-      return data.publicUrl;
+      return `${supabaseUrl}/storage/v1/object/public/images/${fileName}`;
     } catch (err) {
       console.error("Upload exception:", err);
       showToast('Gagal mengunggah gambar. Pastikan ukuran tidak terlalu besar.');
