@@ -27,7 +27,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'pakanku-app';
+const appId = "pakanku-app";
 
 const categories = [
   { id: 'c1', name: 'Ayam', icon: '🐔' },
@@ -65,27 +65,18 @@ export default function App() {
 
   // --- FIREBASE EFFECTS ---
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        }
-      } catch (e) {
-        console.error("Auth Init Error", e);
-      }
-    };
-    initAuth();
+     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    setUser(currentUser);
 
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      if (!currentUser) {
-        setUserProfile(null);
-        setActiveView('auth');
-        setIsLoading(false);
-      }
-    });
-    return () => unsubscribe();
-  }, []);
+    if (!currentUser) {
+      setUserProfile(null);
+      setActiveView('auth');
+      setIsLoading(false);
+    }
+  });
+
+  return () => unsubscribe();
+}, []);
 
   useEffect(() => {
     if (!user) return;
